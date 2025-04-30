@@ -39,7 +39,6 @@ where
             .add_transaction(TransactionOrigin::Local, pool_transaction)
             .await
             .map_err(Self::Error::from_eth_err)?;
-
         Ok(hash)
     }
 }
