@@ -417,22 +417,12 @@ where
         let changed_senders = self.changed_senders(changed_accounts.into_iter());
 
         // update the pool
-        // let outcome = self.pool.write().on_canonical_state_change(
-        //     block_info,
-        //     mined_transactions,
-        //     changed_senders,
-        //     update_kind,
-        // );
-        let mut write_pool = self.pool.write();
-        let start = Instant::now();
-        let outcome = write_pool.on_canonical_state_change(
+        let outcome = self.pool.write().on_canonical_state_change(
             block_info,
             mined_transactions,
             changed_senders,
             update_kind,
         );
-        let elapsed = start.elapsed();
-        info!("pool on canonical state change took {:?}", elapsed);
 
         // This will discard outdated transactions based on the account's nonce
         self.delete_discarded_blobs(outcome.discarded.iter());
@@ -497,6 +487,7 @@ where
                     timestamp: Instant::now(),
                     origin,
                 };
+                let tx = Arc::new(tx);
                 let added = pool.add_transaction(tx, balance, state_nonce)?;
                 let hash = *added.hash();
                 // transaction was successfully inserted into the pool
