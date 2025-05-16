@@ -161,6 +161,42 @@ where
 {
     type Transaction = <V as TransactionValidator>::Transaction;
 
+    async fn validate_transactions(
+        &self,
+        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
+        let hashes: Vec<_> = transactions.iter().map(|(_, tx)| *tx.hash()).collect();
+        let (tx, rx) = oneshot::channel();
+        {
+            let res = {
+                let to_validation_task = self.to_validation_task.clone();
+                let validator = self.validator.clone();
+                let fut = Box::pin(async move {
+                    let res = validator.validate_transactions(transactions).await;
+                    let _ = tx.send(res);
+                });
+                let to_validation_task = to_validation_task.lock().await;
+                to_validation_task
+                    .send(fut)
+                    .await
+            };
+            if res.is_err() {
+                return hashes.into_iter().map(|hash| TransactionValidationOutcome::Error(
+                    hash,
+                    Box::new(TransactionValidatorError::ValidationServiceUnreachable),
+                )).collect();
+            }
+        }
+
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => hashes.into_iter().map(|hash| TransactionValidationOutcome::Error(
+                hash,
+                Box::new(TransactionValidatorError::ValidationServiceUnreachable),
+            )).collect(),
+        }
+    }
+
     async fn validate_transaction(
         &self,
         origin: TransactionOrigin,
@@ -177,7 +213,9 @@ where
                     let _ = tx.send(res);
                 });
                 let to_validation_task = to_validation_task.lock().await;
-                to_validation_task.send(fut).await
+                to_validation_task
+                    .send(fut)
+                    .await
             };
             if res.is_err() {
                 return TransactionValidationOutcome::Error(
@@ -196,48 +234,6 @@ where
         }
     }
 
-    async fn validate_transactions(
-        &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        let hashes: Vec<_> = transactions.iter().map(|(_, tx)| *tx.hash()).collect();
-        let (tx, rx) = oneshot::channel();
-        {
-            let res = {
-                let to_validation_task = self.to_validation_task.clone();
-                let validator = self.validator.clone();
-                let fut = Box::pin(async move {
-                    let res = validator.validate_transactions(transactions).await;
-                    let _ = tx.send(res);
-                });
-                let to_validation_task = to_validation_task.lock().await;
-                to_validation_task.send(fut).await
-            };
-            if res.is_err() {
-                return hashes
-                    .into_iter()
-                    .map(|hash| {
-                        TransactionValidationOutcome::Error(
-                            hash,
-                            Box::new(TransactionValidatorError::ValidationServiceUnreachable),
-                        )
-                    })
-                    .collect();
-            }
-        }
-        match rx.await {
-            Ok(res) => res,
-            Err(_) => hashes
-                .into_iter()
-                .map(|hash| {
-                    TransactionValidationOutcome::Error(
-                        hash,
-                        Box::new(TransactionValidatorError::ValidationServiceUnreachable),
-                    )
-                })
-                .collect(),
-        }
-    }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
     where

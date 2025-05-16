@@ -572,6 +572,7 @@ clap = "4"
 dashmap = "6.0"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 dirs-next = "2.0.0"
+moka = { version="0.12.10", features=["sync"] }
 dyn-clone = "1.0.17"
 eyre = "0.6"
 fdlimit = "0.3.0"
