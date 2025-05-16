@@ -2226,28 +2226,6 @@ where
         //        .trie_input_duration
         //        .record(trie_input_start.elapsed().as_secs_f64());
 
-<<<<<<< HEAD
-            // Use state root task only if prefix sets are empty, otherwise proof generation is too
-            // expensive because it requires walking over the paths in the prefix set in every
-            // proof.
-            if trie_input.prefix_sets.is_empty() {
-                self.payload_processor.spawn(
-                    header,
-                    txs,
-                    provider_builder,
-                    consistent_view,
-                    trie_input,
-                    &self.config,
-                )
-            } else {
-                debug!(target: "engine::tree", block=?block_num_hash, "Disabling state root task due to non-empty prefix sets");
-                use_state_root_task = false;
-                self.payload_processor.spawn_cache_exclusive(header, txs, provider_builder)
-            }
-        } else {
-            self.payload_processor.spawn_cache_exclusive(header, txs, provider_builder)
-        };
-=======
         //    // Use state root task only if prefix sets are empty, otherwise proof generation is too
         //    // expensive because it requires walking over the paths in the prefix set in every
         //    // proof.
@@ -2267,7 +2245,6 @@ where
         //} else {
         //    self.payload_processor.spawn_cache_exclusive(header, txs, provider_builder)
         //};
->>>>>>> 4fa1c79f43 (skip validate block)
 
         //// Use cached state provider before executing, used in execution after prewarming threads
         //// complete
@@ -2317,56 +2294,6 @@ where
 
         //let mut maybe_state_root = None;
 
-<<<<<<< HEAD
-        if run_parallel_state_root {
-            // if we new payload extends the current canonical change we attempt to use the
-            // background task or try to compute it in parallel
-            if use_state_root_task {
-                debug!(target: "engine::tree", block=?block_num_hash, "Using sparse trie state root algorithm");
-                match handle.state_root() {
-                    Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
-                        let elapsed = execution_finish.elapsed();
-                        info!(target: "engine::tree", ?state_root, ?elapsed, "State root task finished");
-                        // we double check the state root here for good measure
-                        if state_root == block.header().state_root() {
-                            maybe_state_root = Some((state_root, trie_updates, elapsed))
-                        } else {
-                            warn!(
-                                target: "engine::tree",
-                                ?state_root,
-                                block_state_root = ?block.header().state_root(),
-                                "State root task returned incorrect state root"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        debug!(target: "engine::tree", %error, "Background parallel state root computation failed");
-                    }
-                }
-            } else {
-                debug!(target: "engine::tree", block=?block_num_hash, "Using parallel state root algorithm");
-                match self.compute_state_root_parallel(
-                    persisting_kind,
-                    block.header().parent_hash(),
-                    &hashed_state,
-                ) {
-                    Ok(result) => {
-                        info!(
-                            target: "engine::tree",
-                            block = ?block_num_hash,
-                            regular_state_root = ?result.0,
-                            "Regular root task finished"
-                        );
-                        maybe_state_root = Some((result.0, result.1, root_time.elapsed()));
-                    }
-                    Err(ParallelStateRootError::Provider(ProviderError::ConsistentView(error))) => {
-                        debug!(target: "engine::tree", %error, "Parallel state root computation failed consistency check, falling back");
-                    }
-                    Err(error) => return Err((InsertBlockErrorKind::Other(Box::new(error)), block)),
-                }
-            }
-        }
-=======
         //if run_parallel_state_root {
         //    // if we new payload extends the current canonical change we attempt to use the
         //    // background task or try to compute it in parallel
@@ -2413,7 +2340,6 @@ where
         //        }
         //    }
         //}
->>>>>>> 4fa1c79f43 (skip validate block)
 
         //let (state_root, trie_output, root_elapsed) = if let Some(maybe_state_root) =
         //    maybe_state_root
