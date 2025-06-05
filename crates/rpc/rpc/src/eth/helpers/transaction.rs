@@ -2,6 +2,8 @@
 
 use crate::EthApi;
 use alloy_primitives::{Bytes, B256};
+use reth_metrics::{metrics::Histogram, Metrics};
+use reth_metrics::metrics as metrics;
 use reth_rpc_eth_api::{
     helpers::{EthSigner, EthTransactions, LoadTransaction, SpawnBlocking},
     FromEthApiError, FullEthApiTypes, RpcNodeCore, RpcNodeCoreExt,
@@ -9,6 +11,15 @@ use reth_rpc_eth_api::{
 use reth_rpc_eth_types::utils::recover_raw_transaction;
 use reth_storage_api::{BlockReader, BlockReaderIdExt, ProviderTx, TransactionsProvider};
 use reth_transaction_pool::{PoolTransaction, TransactionOrigin, TransactionPool};
+
+#[derive(Metrics)]
+#[metrics(scope = "rpc")]
+struct TxPoolMetrics {
+    /// txn insert time 
+    pub(crate) txn_in_mempool_duration: Histogram,
+}
+
+static TX_POOL_METRICS: std::sync::OnceLock<TxPoolMetrics> = std::sync::OnceLock::new();
 
 impl<Provider, Pool, Network, EvmConfig> EthTransactions
     for EthApi<Provider, Pool, Network, EvmConfig>
@@ -25,6 +36,7 @@ where
     ///
     /// Returns the hash of the transaction.
     async fn send_raw_transaction(&self, tx: Bytes) -> Result<B256, Self::Error> {
+        let now = std::time::Instant::now();
         let recovered = recover_raw_transaction(&tx)?;
 
         // broadcast raw transaction to subscribers if there is any.
@@ -38,6 +50,10 @@ where
             .add_transaction(TransactionOrigin::Local, pool_transaction)
             .await
             .map_err(Self::Error::from_eth_err)?;
+
+        let duration = now.elapsed();
+        let metrics = TX_POOL_METRICS.get_or_init(TxPoolMetrics::default);
+        metrics.txn_in_mempool_duration.record(duration.as_secs_f64());
 
         Ok(hash)
     }

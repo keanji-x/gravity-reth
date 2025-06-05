@@ -1037,22 +1037,29 @@ where
             // Check if persistence has complete
             match rx.try_recv() {
                 Ok(last_persisted_hash_num) => {
-                    self.metrics.engine.persistence_duration.record(start_time.elapsed());
-                    let Some(BlockNumHash {
+                    let elapsed = start_time.elapsed();
+                    self.metrics.engine.persistence_duration.record(elapsed);
+                    if let Some(BlockNumHash {
                         hash: last_persisted_block_hash,
                         number: last_persisted_block_number,
                     }) = last_persisted_hash_num
-                    else {
+                    {
+                        self.metrics.engine.persistence_duration_per_block.record(
+                            elapsed.as_secs_f64() /
+                                (last_persisted_block_number -
+                                    self.persistence_state.last_persisted_block.number)
+                                    as f64,
+                        );
+                        info!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
+                        self.persistence_state
+                            .finish(last_persisted_block_hash, last_persisted_block_number);
+                        self.on_new_persisted_block()?;
+                    } else {
                         // if this happened, then we persisted no blocks because we sent an
                         // empty vec of blocks
                         warn!(target: "engine::tree", "Persistence task completed but did not persist any blocks");
                         return Ok(())
                     };
-
-                    debug!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
-                    self.persistence_state
-                        .finish(last_persisted_block_hash, last_persisted_block_number);
-                    self.on_new_persisted_block()?;
                 }
                 Err(TryRecvError::Closed) => return Err(TryRecvError::Closed.into()),
                 Err(TryRecvError::Empty) => {
@@ -2258,6 +2265,7 @@ where
             handle.cache_metrics(),
         );
 
+        let execution_start = Instant::now();
         let (output, execution_finish) = if self.config.state_provider_metrics() {
             let state_provider = InstrumentedStateProvider::from_state_provider(&state_provider);
             let (output, execution_finish) =
@@ -2269,6 +2277,7 @@ where
                 ensure_ok!(self.execute_block(&state_provider, &block, &handle));
             (output, execution_finish)
         };
+        self.metrics.engine.block_execution_duration.record(execution_finish.duration_since(execution_start));
 
         // after executing the block we can stop executing transactions
         handle.stop_prewarming_execution();
