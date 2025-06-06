@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use reth_evm::metrics::ExecutorMetrics;
 use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
@@ -16,6 +18,17 @@ pub(crate) struct EngineApiMetrics {
     pub(crate) block_validation: BlockValidationMetrics,
     /// A copy of legacy blockchain tree metrics, to be replaced when we replace the old tree
     pub(crate) tree: TreeMetrics,
+
+    last_block_finalize_time: Option<Instant>,
+}
+
+impl EngineApiMetrics {
+    pub(crate) fn record_block_finalize_time(&mut self, time: Instant) {
+        if let Some(last_block_finalize_time) = self.last_block_finalize_time {
+            self.engine.block_finalize_time_diff.record(time.duration_since(last_block_finalize_time));
+        }
+        self.last_block_finalize_time = Some(time);
+    }
 }
 
 /// Metrics for the entire blockchain tree
@@ -50,6 +63,8 @@ pub(crate) struct EngineMetrics {
     pub(crate) persistence_duration_per_block: Histogram,
     /// Histogram of block execution stage durations (in seconds)
     pub(crate) block_execution_duration: Histogram,
+    /// Time difference between two adjacent blocks completing finalize (in seconds)
+    pub(crate) block_finalize_time_diff: Histogram,
     /// Tracks the how often we failed to deliver a newPayload response.
     ///
     /// This effectively tracks how often the message sender dropped the channel and indicates a CL
