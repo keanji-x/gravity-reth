@@ -39,3 +39,5 @@ alloy-primitives.workspace = true
 
 # misc
 tracing.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true

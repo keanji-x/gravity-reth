@@ -11,6 +11,7 @@ use alloy_evm::{
 };
 use alloy_primitives::B256;
 use core::fmt::Debug;
+use std::time::Instant;
 pub use reth_execution_errors::{
     BlockExecutionError, BlockValidationError, InternalBlockExecutionError,
 };
@@ -386,6 +387,19 @@ impl<Executor: BlockExecutor> ExecutorTx<Executor> for Recovered<Executor::Trans
     }
 }
 
+use reth_metrics::{metrics::Histogram, Metrics};
+
+#[derive(Metrics)]
+#[metrics(scope = "block_builder")]
+struct BlockBuilderMetrics {
+    /// Histogram of executor finish operation durations (in seconds)
+    executor_finish_duration: Histogram,
+    /// Histogram of merkle operation durations (in seconds)
+    merkle_duration: Histogram,
+}
+
+static BLOCK_BUILDER_METRICS: std::sync::LazyLock<BlockBuilderMetrics> = std::sync::LazyLock::new(BlockBuilderMetrics::default);
+
 impl<'a, F, DB, Executor, Builder, N> BlockBuilder
     for BasicBlockBuilder<'a, F, Executor, Builder, N>
 where
@@ -431,17 +445,21 @@ where
         self,
         state: impl StateProvider,
     ) -> Result<BlockBuilderOutcome<N>, BlockExecutionError> {
+        let start_time = Instant::now();
         let (evm, result) = self.executor.finish()?;
         let (db, evm_env) = evm.finish();
 
         // merge all transitions into bundle state
         db.merge_transitions(BundleRetention::Reverts);
+        BLOCK_BUILDER_METRICS.executor_finish_duration.record(start_time.elapsed());
 
         // calculate the state root
+        let start_time = Instant::now();
         let hashed_state = state.hashed_post_state(&db.bundle_state);
         let (state_root, trie_updates) = state
             .state_root_with_updates(hashed_state.clone())
             .map_err(BlockExecutionError::other)?;
+        BLOCK_BUILDER_METRICS.merkle_duration.record(start_time.elapsed());
 
         let (transactions, senders) =
             self.transactions.into_iter().map(|tx| tx.into_parts()).unzip();

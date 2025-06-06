@@ -35,14 +35,24 @@ use reth_transaction_pool::{
     ValidPoolTransaction,
 };
 use revm::context_interface::Block as _;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tracing::{debug, trace, warn};
+use reth_metrics::{metrics::Histogram, Metrics};
 
 mod config;
 pub use config::*;
 
 pub mod validator;
 pub use validator::EthereumExecutionPayloadValidator;
+
+#[derive(Metrics)]
+#[metrics(scope = "payload")]
+struct PayloadMetrics {
+    /// Histogram of payload execution operation durations (in seconds)
+    execution_duration: Histogram,
+}
+
+static PAYLOAD_METRICS: std::sync::LazyLock<PayloadMetrics> = std::sync::LazyLock::new(PayloadMetrics::default);
 
 type BestTransactionsIter<Pool> = Box<
     dyn BestTransactions<Item = Arc<ValidPoolTransaction<<Pool as TransactionPool>::Transaction>>>,
@@ -150,6 +160,7 @@ where
     let BuildArguments { mut cached_reads, config, cancel, best_payload } = args;
     let PayloadConfig { parent_header, attributes } = config;
 
+    let execution_start = Instant::now();
     let state_provider = client.state_by_block_hash(parent_header.hash())?;
     let state = StateProviderDatabase::new(&state_provider);
     let mut db =
@@ -326,6 +337,8 @@ where
         // can skip building the block
         return Ok(BuildOutcome::Aborted { fees: total_fees, cached_reads })
     }
+
+    PAYLOAD_METRICS.execution_duration.record(execution_start.elapsed());
 
     let BlockBuilderOutcome { execution_result, block, .. } = builder.finish(&state_provider)?;
 
