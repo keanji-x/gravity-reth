@@ -2430,6 +2430,7 @@ where
         };
         self.emit_event(EngineApiEvent::BeaconConsensus(engine_event));
 
+        self.metrics.record_block_finalize_time(Instant::now());
         debug!(target: "engine::tree", block=?block_num_hash, "Finished inserting block");
         Ok(InsertPayloadOk::Inserted(BlockStatus::Valid))
     }
