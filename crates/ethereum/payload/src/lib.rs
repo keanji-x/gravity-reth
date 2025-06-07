@@ -10,7 +10,7 @@
 #![allow(clippy::useless_let_if_seq)]
 
 use alloy_consensus::Transaction;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use reth_basic_payload_builder::{
     is_better_payload, BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder,
     PayloadConfig,
@@ -35,15 +35,40 @@ use reth_transaction_pool::{
     ValidPoolTransaction,
 };
 use revm::context_interface::Block as _;
-use std::{sync::Arc, time::Instant};
+use std::{sync::{Arc, LazyLock, Mutex}, time::Instant, any::Any, collections::HashMap};
 use tracing::{debug, trace, warn};
 use reth_metrics::{metrics::Histogram, Metrics};
+use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
+use reth_execution_types::ExecutionOutcome;
+use reth_primitives_traits::NodePrimitives;
 
 mod config;
 pub use config::*;
 
 pub mod validator;
 pub use validator::EthereumExecutionPayloadValidator;
+
+pub static EXECUTED_BLOCK_MAP: LazyLock<Box<dyn Any + Send + Sync>> = LazyLock::new(|| Box::new(ExecutedBlockMap::<EthPrimitives>::default()));
+
+#[derive(Debug, Default)]
+pub struct ExecutedBlockMap<N: NodePrimitives> {
+    inner: Mutex<HashMap<B256, ExecutedBlockWithTrieUpdates<N>>>,
+}
+
+impl<N: NodePrimitives> ExecutedBlockMap<N> {
+    pub fn insert(&self, block_hash: B256, executed_block: ExecutedBlockWithTrieUpdates<N>) {
+        self.inner.lock().unwrap().insert(block_hash, executed_block);
+    }
+
+    pub fn remove(&self, block_hash: &B256) -> ExecutedBlockWithTrieUpdates<N> {
+        self.inner.lock().unwrap().remove(block_hash).unwrap()
+    }
+}
+
+pub fn get_executed_block_map<N: NodePrimitives>(
+) -> &'static ExecutedBlockMap<N> {
+    EXECUTED_BLOCK_MAP.downcast_ref::<ExecutedBlockMap<N>>().unwrap()
+}
 
 #[derive(Metrics)]
 #[metrics(scope = "payload")]
@@ -52,7 +77,7 @@ struct PayloadMetrics {
     execution_duration: Histogram,
 }
 
-static PAYLOAD_METRICS: std::sync::LazyLock<PayloadMetrics> = std::sync::LazyLock::new(PayloadMetrics::default);
+static PAYLOAD_METRICS: LazyLock<PayloadMetrics> = LazyLock::new(PayloadMetrics::default);
 
 type BestTransactionsIter<Pool> = Box<
     dyn BestTransactions<Item = Arc<ValidPoolTransaction<<Pool as TransactionPool>::Transaction>>>,
@@ -340,13 +365,25 @@ where
 
     PAYLOAD_METRICS.execution_duration.record(execution_start.elapsed());
 
-    let BlockBuilderOutcome { execution_result, block, .. } = builder.finish(&state_provider)?;
+    let BlockBuilderOutcome { execution_result, trie_updates, hashed_state, block } = builder.finish(&state_provider)?;
 
     let requests = chain_spec
         .is_prague_active_at_timestamp(attributes.timestamp)
         .then_some(execution_result.requests);
 
     let sealed_block = Arc::new(block.sealed_block().clone());
+    let executed_block: ExecutedBlockWithTrieUpdates<EthPrimitives> = ExecutedBlockWithTrieUpdates::new(
+        Arc::new(block),
+Arc::new(ExecutionOutcome {
+                bundle: db.take_bundle(),
+                receipts: vec![execution_result.receipts],
+                first_block: sealed_block.number,
+                requests: vec![requests.clone().unwrap_or_default()],
+            }),
+            Arc::new(hashed_state),
+            ExecutedTrieUpdates::Present(Arc::new(trie_updates)),
+    );
+    get_executed_block_map().insert(sealed_block.hash(), executed_block);
     debug!(target: "payload_builder", id=%attributes.id, sealed_block_header = ?sealed_block.sealed_header(), "sealed built block");
 
     let payload = EthBuiltPayload::new(attributes.id, sealed_block, total_fees, requests)
