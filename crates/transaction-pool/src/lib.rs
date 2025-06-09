@@ -525,9 +525,9 @@ where
             }
         };
         let (_, tx) = self.validate(origin, transaction).await;
-        self.pool.blob_store_metrics.txn_val_duration.record(start.elapsed().as_millis() as f64);
+        self.pool.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
-        self.pool.blob_store_metrics.txn_ins_duration.record(start.elapsed().as_millis() as f64);
+        self.pool.blob_store_metrics.txn_val_insertion_time.record(start.elapsed().as_millis() as f64);
         results.pop().expect("result length is the same as the input")
     }
 
