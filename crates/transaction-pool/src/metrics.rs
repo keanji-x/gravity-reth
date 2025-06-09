@@ -74,6 +74,10 @@ pub struct BlobStoreMetrics {
     pub(crate) blobstore_byte_size: Gauge,
     /// How many blobs are currently in the blobstore
     pub(crate) blobstore_entries: Gauge,
+    /// How long to successfully validate a blob
+    pub(crate) txn_val_duration: Histogram,
+    /// How long to successfully insert a blob
+    pub(crate) txn_ins_duration: Histogram,
 }
 
 /// Transaction pool maintenance metrics

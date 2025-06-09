@@ -150,7 +150,7 @@ where
     /// Listener for new blob transaction sidecars added to the pool.
     blob_transaction_sidecar_listener: Mutex<Vec<BlobTransactionSidecarListener>>,
     /// Metrics for the blob store
-    blob_store_metrics: BlobStoreMetrics,
+    pub(crate) blob_store_metrics: BlobStoreMetrics,
 }
 
 // === impl PoolInner ===
