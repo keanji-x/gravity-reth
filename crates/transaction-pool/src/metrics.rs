@@ -2,7 +2,7 @@
 
 use metrics::Histogram;
 use reth_metrics::{
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Counter, Gauge},
     Metrics,
 };
 
