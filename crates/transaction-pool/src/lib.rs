@@ -369,8 +369,11 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
+        let start = std::time::Instant::now();
         let (_, tx) = self.validate(origin, transaction).await;
+        self.pool.blob_store_metrics.txn_val_duration.record(start.elapsed().as_millis() as f64);
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
+        self.pool.blob_store_metrics.txn_ins_duration.record(start.elapsed().as_millis() as f64);
         results.pop().expect("result length is the same as the input")
     }
 
