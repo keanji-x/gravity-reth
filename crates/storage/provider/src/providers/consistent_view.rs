@@ -1,13 +1,8 @@
 use crate::{BlockNumReader, DatabaseProviderFactory, HeaderProvider};
 use alloy_primitives::B256;
-use reth_errors::ProviderError;
-use reth_storage_api::{BlockHashReader, DBProvider, StateCommitmentProvider};
-use reth_storage_errors::provider::ProviderResult;
-
-use reth_trie::HashedPostState;
-use reth_trie_db::{DatabaseHashedPostState, StateCommitment};
-
+use reth_storage_api::StateCommitmentProvider;
 pub use reth_storage_errors::provider::ConsistentViewError;
+use reth_storage_errors::provider::ProviderResult;
 
 /// A consistent view over state in the database.
 ///
@@ -27,7 +22,7 @@ pub use reth_storage_errors::provider::ConsistentViewError;
 #[derive(Clone, Debug)]
 pub struct ConsistentDbView<Factory> {
     factory: Factory,
-    pub tip: Option<(B256, u64)>,
+    tip: Option<(B256, u64)>,
 }
 
 impl<Factory> ConsistentDbView<Factory>
@@ -46,31 +41,6 @@ where
         let last_num = provider_ro.last_block_number()?;
         let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
         Ok(Self::new(provider, tip))
-    }
-
-    /// Creates new consistent database view with best tip.
-    pub fn new_with_best_tip(provider: Factory) -> ProviderResult<Self> {
-        let provider_ro = provider.database_provider_ro()?;
-        let last_num = provider_ro.best_block_number()?;
-        let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
-        Ok(Self::new(provider, tip))
-    }
-
-    /// Retrieve revert hashed state down to the given block hash.
-    pub fn revert_state(&self, block_hash: B256) -> ProviderResult<HashedPostState> {
-        let provider = self.provider_ro()?;
-        let block_number = provider
-            .block_number(block_hash)?
-            .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
-        if block_number == provider.best_block_number()? &&
-            block_number == provider.last_block_number()?
-        {
-            Ok(HashedPostState::default())
-        } else {
-            Ok(HashedPostState::from_reverts::<
-                <Factory::StateCommitment as StateCommitment>::KeyHasher,
-            >(provider.tx_ref(), block_number + 1)?)
-        }
     }
 
     /// Creates new read-only provider and performs consistency checks on the current tip.
@@ -111,6 +81,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use reth_errors::ProviderError;
     use std::str::FromStr;
 
     use super::*;
@@ -122,8 +93,8 @@ mod tests {
     use assert_matches::assert_matches;
     use reth_chainspec::{EthChainSpec, MAINNET};
     use reth_ethereum_primitives::{Block, BlockBody};
-    use reth_primitives::StaticFileSegment;
     use reth_primitives_traits::{block::TestBlock, RecoveredBlock, SealedBlock};
+    use reth_static_file_types::StaticFileSegment;
     use reth_storage_api::StorageLocation;
 
     #[test]

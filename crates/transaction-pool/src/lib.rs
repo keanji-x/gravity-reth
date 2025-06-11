@@ -164,7 +164,7 @@ pub use crate::{
     ordering::{CoinbaseTipOrdering, Priority, TransactionOrdering},
     pool::{
         blob_tx_priority, fee_delta, state::SubPool, AllTransactionsEvents, FullTransactionEvent,
-        TransactionEvent, TransactionEvents,
+        NewTransactionEvent, TransactionEvent, TransactionEvents, TransactionListenerKind,
     },
     traits::*,
     validate::{
@@ -173,17 +173,19 @@ pub use crate::{
     },
 };
 use crate::{identifier::TransactionId, pool::PoolInner};
-use alloy_eips::eip4844::{BlobAndProofV1, BlobTransactionSidecar};
+use alloy_eips::{
+    eip4844::{BlobAndProofV1, BlobAndProofV2},
+    eip7594::BlobTransactionSidecarVariant,
+};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use aquamarine as _;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
-use reth_primitives::Recovered;
-use reth_primitives_traits::Block;
+use reth_primitives_traits::{Block, Recovered};
 use reth_storage_api::StateProviderFactory;
-use std::{collections::HashSet, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
-use tokio::sync::{mpsc::Receiver, Mutex};
+use std::{collections::HashSet, sync::Arc};
+use tokio::sync::mpsc::Receiver;
 use tracing::{instrument, trace};
 
 pub mod error;
@@ -215,43 +217,24 @@ pub type EthTransactionPool<Client, S> = Pool<
 pub struct Pool<V, T: TransactionOrdering, S> {
     /// Arc'ed instance of the pool internals
     pool: Arc<PoolInner<V, T, S>>,
-    batch_insert_task_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    batch_insert_task_running: Arc<AtomicBool>,
-}
-
-static ENABLE_BATCH_INSERT: AtomicU8 = AtomicU8::new(2);
-fn get_enable_batch_insert() -> bool {
-    let val = ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire);
-    if val == 2 {
-        let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or("false".to_string());
-        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::Release);
-        return ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire) == 1;
-    }
-    val == 1
 }
 
 // === impl Pool ===
 
 impl<V, T, S> Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
 {
     /// Create a new transaction pool instance.
     pub fn new(validator: V, ordering: T, blob_store: S, config: PoolConfig) -> Self {
-        let pool = Arc::new(PoolInner::new(validator, ordering, blob_store, config));
-        Self { pool, batch_insert_task_handle: Arc::new(Mutex::new(None)), batch_insert_task_running: Arc::new(AtomicBool::new(false)) }
+        Self { pool: Arc::new(PoolInner::new(validator, ordering, blob_store, config)) }
     }
 
     /// Returns the wrapped pool.
     pub(crate) fn inner(&self) -> &PoolInner<V, T, S> {
         &self.pool
-    }
-
-    /// Returns the unix timestamp in milliseconds when the transaction was inserted into the pool.
-    pub fn txn_insert_time(&self, txn_hash: TxHash) -> Option<u64> {
-        self.inner().txn_insert_time.get(&txn_hash).map(|t| *t)
     }
 
     /// Get the config the pool was configured with.
@@ -265,11 +248,11 @@ where
     async fn validate_all(
         &self,
         origin: TransactionOrigin,
-        transactions: impl IntoIterator<Item = V::Transaction>,
+        transactions: impl IntoIterator<Item = V::Transaction> + Send,
     ) -> Vec<(TxHash, TransactionValidationOutcome<V::Transaction>)> {
         self.pool
             .validator()
-            .validate_transactions(transactions.into_iter().map(|tx| (origin, tx)).collect())
+            .validate_transactions_with_origin(origin, transactions)
             .await
             .into_iter()
             .map(|tx| (tx.tx_hash(), tx))
@@ -285,6 +268,7 @@ where
         let hash = *transaction.hash();
 
         let outcome = self.pool.validator().validate_transaction(origin, transaction).await;
+
         (hash, outcome)
     }
 
@@ -356,7 +340,7 @@ where
 /// implements the `TransactionPool` interface for various transaction pool API consumers.
 impl<V, T, S> TransactionPool for Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -385,25 +369,6 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
-        let pool = self.pool.clone();
-        if self.batch_insert_task_running.load(std::sync::atomic::Ordering::Acquire) {
-            return self.pool
-                    .send_transaction(origin, transaction)
-                    .await
-        }
-        if get_enable_batch_insert()  {
-            {
-                let mut handle = self.batch_insert_task_handle.lock().await;
-                if handle.is_none() {
-                    tracing::info!("Batch insert task started");
-                    *handle = Some(std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().unwrap();
-                        rt.block_on(pool.batch_add_transactions_task());
-                    }));
-                }
-                self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        };
         let (_, tx) = self.validate(origin, transaction).await;
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
         results.pop().expect("result length is the same as the input")
@@ -418,6 +383,7 @@ where
             return Vec::new()
         }
         let validated = self.validate_all(origin, transactions).await;
+
         self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
     }
 
@@ -626,35 +592,42 @@ where
     fn get_blob(
         &self,
         tx_hash: TxHash,
-    ) -> Result<Option<Arc<BlobTransactionSidecar>>, BlobStoreError> {
+    ) -> Result<Option<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
         self.pool.blob_store().get(tx_hash)
     }
 
     fn get_all_blobs(
         &self,
         tx_hashes: Vec<TxHash>,
-    ) -> Result<Vec<(TxHash, Arc<BlobTransactionSidecar>)>, BlobStoreError> {
+    ) -> Result<Vec<(TxHash, Arc<BlobTransactionSidecarVariant>)>, BlobStoreError> {
         self.pool.blob_store().get_all(tx_hashes)
     }
 
     fn get_all_blobs_exact(
         &self,
         tx_hashes: Vec<TxHash>,
-    ) -> Result<Vec<Arc<BlobTransactionSidecar>>, BlobStoreError> {
+    ) -> Result<Vec<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
         self.pool.blob_store().get_exact(tx_hashes)
     }
 
-    fn get_blobs_for_versioned_hashes(
+    fn get_blobs_for_versioned_hashes_v1(
         &self,
         versioned_hashes: &[B256],
     ) -> Result<Vec<Option<BlobAndProofV1>>, BlobStoreError> {
-        self.pool.blob_store().get_by_versioned_hashes(versioned_hashes)
+        self.pool.blob_store().get_by_versioned_hashes_v1(versioned_hashes)
+    }
+
+    fn get_blobs_for_versioned_hashes_v2(
+        &self,
+        versioned_hashes: &[B256],
+    ) -> Result<Option<Vec<BlobAndProofV2>>, BlobStoreError> {
+        self.pool.blob_store().get_by_versioned_hashes_v2(versioned_hashes)
     }
 }
 
 impl<V, T, S> TransactionPoolExt for Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -689,8 +662,8 @@ where
     }
 }
 
-impl<V: 'static, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
+impl<V, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
     fn clone(&self) -> Self {
-        Self { pool: Arc::clone(&self.pool), batch_insert_task_handle: self.batch_insert_task_handle.clone(), batch_insert_task_running: self.batch_insert_task_running.clone() }
+        Self { pool: Arc::clone(&self.pool) }
     }
 }

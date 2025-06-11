@@ -35,7 +35,17 @@ pub mod alloy;
 
 #[cfg(not(feature = "test-utils"))]
 #[cfg(any(test, feature = "alloy"))]
-mod alloy;
+pub mod alloy;
+
+pub mod txtype;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
+// Used by generated code and doc tests. Not public API.
+#[doc(hidden)]
+#[path = "private.rs"]
+pub mod __private;
 
 pub mod txtype;
 
@@ -762,7 +772,6 @@ mod tests {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     #[test_fuzz::test_fuzz]
     fn compact_test_enum_all_variants(var0: TestEnum, var1: TestEnum, var2: TestEnum) {
         let mut buf = vec![];

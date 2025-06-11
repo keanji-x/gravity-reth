@@ -1,8 +1,9 @@
 use alloy_primitives::{B256, U256};
-use reth_db::tables;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
+    tables,
     transaction::DbTx,
+    DatabaseError,
 };
 use reth_primitives_traits::Account;
 use reth_trie::hashed_cursor::{HashedCursor, HashedCursorFactory, HashedStorageCursor};
@@ -95,7 +96,7 @@ where
         self.0.seek(key)
     }
 
-    fn next(&mut self) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
+    fn next(&mut self) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
         self.0.next()
     }
 }
@@ -145,7 +146,7 @@ where
         Ok(self.cursor.seek_by_key_subkey(self.hashed_address, subkey)?.map(|e| (e.key, e.value)))
     }
 
-    fn next(&mut self) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
+    fn next(&mut self) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
         Ok(self.cursor.next_dup_val()?.map(|e| (e.key, e.value)))
     }
 }
@@ -155,7 +156,7 @@ where
     C: DbCursorRO<tables::HashedStorages> + DbDupCursorRO<tables::HashedStorages>,
     R: TrieCacheReader,
 {
-    fn is_storage_empty(&mut self) -> Result<bool, reth_db::DatabaseError> {
+    fn is_storage_empty(&mut self) -> Result<bool, DatabaseError> {
         Ok(self.cursor.seek_exact(self.hashed_address)?.is_none())
     }
 }
