@@ -156,7 +156,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             provider_rw.insert_block(sealed_block.clone(), StorageLocation::Database)?;
 
             let executor = executor_provider.batch_executor(StateProviderDatabase::new(
-                LatestStateProviderRef::new(&provider_rw),
+                LatestStateProviderRef::new(&provider_rw, None),
             ));
             let output = executor.execute(&sealed_block)?;
 
