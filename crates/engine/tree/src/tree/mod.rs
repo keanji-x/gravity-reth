@@ -27,7 +27,7 @@ use reth_consensus::{Consensus, FullConsensus};
 pub use reth_engine_primitives::InvalidBlockHook;
 use reth_engine_primitives::{
     BeaconConsensusEngineEvent, BeaconEngineMessage, BeaconOnNewPayloadError, EngineValidator,
-    ExecutionPayload, ForkchoiceStateTracker, OnForkChoiceUpdated,
+    ExecutionPayload, ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_evm::{ConfigureEvm, Evm, SpecFor};
@@ -134,39 +134,6 @@ where
             provider = Box::new(MemoryOverlayStateProvider::new(provider, overlay))
         }
         Ok(provider)
-    }
-}
-
-/// A builder for creating state providers that can be used across threads.
-#[derive(Clone, Debug)]
-pub struct StateProviderBuilder<N: NodePrimitives, P> {
-    /// The provider factory used to create providers.
-    provider_factory: P,
-    /// The historical block hash to fetch state from.
-    historical: B256,
-    /// The blocks that form the chain from historical to target.
-    blocks: Vec<ExecutedBlockWithTrieUpdates<N>>,
-}
-
-impl<N: NodePrimitives, P> StateProviderBuilder<N, P> {
-    /// Creates a new state provider from the provider factory, historical block hash and blocks.
-    fn new(
-        provider_factory: P,
-        historical: B256,
-        blocks: Vec<ExecutedBlockWithTrieUpdates<N>>,
-    ) -> Self {
-        Self { provider_factory, historical, blocks }
-    }
-}
-
-impl<N: NodePrimitives, P> StateProviderBuilder<N, P>
-where
-    P: BlockReader + StateProviderFactory + StateReader + StateCommitmentProvider + Clone,
-{
-    /// Creates a new state provider from this builder.
-    pub fn build(&self) -> ProviderResult<StateProviderBox> {
-        let historical = self.provider_factory.state_by_block_hash(self.historical)?;
-        Ok(Box::new(MemoryOverlayStateProvider::new(historical, self.blocks.clone())))
     }
 }
 
@@ -2680,73 +2647,6 @@ where
             PayloadStatusEnum::Invalid { validation_error: validation_err.to_string() },
             latest_valid_hash,
         ))
-    }
-
-    /// Waits for the result on the input [`StateRootHandle`], and handles it, falling back to
-    /// the hash builder-based state root calculation if it fails.
-    fn handle_state_root_result(
-        &self,
-        state_root_handle: StateRootHandle,
-        state_root_task_config: StateRootConfig<P>,
-        sealed_block: &SealedBlock<N::Block>,
-        hashed_state: &HashedPostState,
-        state_provider: impl StateRootProvider,
-        root_time: Instant,
-    ) -> Result<(B256, TrieUpdates, Duration), InsertBlockErrorKind> {
-        match state_root_handle.wait_for_result() {
-            Ok(StateRootComputeOutcome {
-                state_root: (task_state_root, task_trie_updates),
-                time_from_last_update,
-                ..
-            }) => {
-                info!(
-                    target: "engine::tree",
-                    block = ?sealed_block.num_hash(),
-                    ?task_state_root,
-                    task_elapsed = ?time_from_last_update,
-                    "State root task finished"
-                );
-
-                if task_state_root != sealed_block.header().state_root() ||
-                    self.config.always_compare_trie_updates()
-                {
-                    if task_state_root != sealed_block.header().state_root() {
-                        debug!(target: "engine::tree", "Task state root does not match block state root");
-                    }
-
-                    let (regular_root, regular_updates) =
-                        state_provider.state_root_with_updates(hashed_state.clone())?;
-
-                    if regular_root == sealed_block.header().state_root() {
-                        let provider_ro = state_root_task_config.consistent_view.provider_ro()?;
-                        let in_memory_trie_cursor = InMemoryTrieCursorFactory::new(
-                            DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
-                            &state_root_task_config.nodes_sorted,
-                        );
-                        compare_trie_updates(
-                            in_memory_trie_cursor,
-                            task_trie_updates.clone(),
-                            regular_updates.clone(),
-                        )
-                        .map_err(ProviderError::from)?;
-                        if task_state_root != sealed_block.header().state_root() {
-                            return Ok((regular_root, regular_updates, time_from_last_update));
-                        }
-                    } else {
-                        debug!(target: "engine::tree", "Regular state root does not match block state root");
-                    }
-                }
-
-                Ok((task_state_root, task_trie_updates, time_from_last_update))
-            }
-            Err(error) => {
-                info!(target: "engine::tree", ?error, "Failed to wait for state root task result");
-                // Fall back to sequential calculation
-                let (root, updates) =
-                    state_provider.state_root_with_updates(hashed_state.clone())?;
-                Ok((root, updates, root_time.elapsed()))
-            }
-        }
     }
 
     /// Attempts to find the header for the given block hash if it is canonical.

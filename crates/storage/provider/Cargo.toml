@@ -55,13 +55,15 @@ parking_lot.workspace = true
 dashmap = { workspace = true, features = ["inline"] }
 strum.workspace = true
 eyre.workspace = true
+paste.workspace = true
 
 # test-utils
 reth-ethereum-engine-primitives = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync"], optional = true }
+tokio.workspace = true
 
 # parallel utils
 rayon.workspace = true
+flume = "0.11.1"
 
 [dev-dependencies]
 reth-db = { workspace = true, features = ["test-utils"] }
@@ -100,5 +102,4 @@ test-utils = [
     "reth-prune-types/test-utils",
     "reth-stages-types/test-utils",
     "revm-state",
-    "tokio",
 ]

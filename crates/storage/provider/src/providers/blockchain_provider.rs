@@ -6,8 +6,8 @@ use crate::{
     ChainSpecProvider, ChainStateBlockReader, ChangeSetReader, DatabaseProvider,
     DatabaseProviderFactory, FullProvider, HashedPostStateProvider, HeaderProvider, ProviderError,
     ProviderFactory, PruneCheckpointReader, ReceiptProvider, ReceiptProviderIdExt,
-    StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
-    StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
+    StageCheckpointReader, StateProviderBox, StateProviderFactory, StateProviderOptions,
+    StateReader, StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{transaction::TransactionMeta, Header};
 use alloy_eips::{
@@ -33,7 +33,6 @@ use reth_node_types::{BlockTy, HeaderTy, NodeTypesWithDB, ReceiptTy, TxTy};
 use reth_primitives_traits::{
     Account, BlockBody, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader, StorageEntry,
 };
-use reth_primitives_traits::BlockBody;
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{

@@ -13,8 +13,8 @@ use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
     BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
     LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
-    StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
-    STATE_PROVIDER_OPTS,
+    StateProvider, StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation,
+    TransactionVariant, STATE_PROVIDER_OPTS,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
@@ -383,7 +383,7 @@ where
 
 impl<E> ExecutionStage<E>
 where
-    E: BlockExecutorProvider,
+    E: ConfigureEvm,
 {
     fn execute_inner<Provider>(
         &mut self,

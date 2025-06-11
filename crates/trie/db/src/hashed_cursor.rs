@@ -42,7 +42,7 @@ impl<TX: DbTx, CR: TrieCacheReader> HashedCursorFactory
     type StorageCursor =
         DatabaseHashedStorageCursor<<TX as DbTx>::DupCursor<tables::HashedStorages>, CR>;
 
-    fn hashed_account_cursor(&self) -> Result<Self::AccountCursor, reth_db::DatabaseError> {
+    fn hashed_account_cursor(&self) -> Result<Self::AccountCursor, DatabaseError> {
         Ok(DatabaseHashedAccountCursor::with_cache(
             self.0.cursor_read::<tables::HashedAccounts>()?,
             self.1.clone(),
@@ -52,7 +52,7 @@ impl<TX: DbTx, CR: TrieCacheReader> HashedCursorFactory
     fn hashed_storage_cursor(
         &self,
         hashed_address: B256,
-    ) -> Result<Self::StorageCursor, reth_db::DatabaseError> {
+    ) -> Result<Self::StorageCursor, DatabaseError> {
         Ok(DatabaseHashedStorageCursor::with_cache(
             self.0.cursor_dup_read::<tables::HashedStorages>()?,
             self.1.clone(),
@@ -87,7 +87,7 @@ where
 {
     type Value = Account;
 
-    fn seek(&mut self, key: B256) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
+    fn seek(&mut self, key: B256) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
         if let Some(cache) = &self.1 {
             if let Some(acount) = cache.hashed_account(key) {
                 return Ok(Some((key, acount)));
@@ -134,10 +134,7 @@ where
 {
     type Value = U256;
 
-    fn seek(
-        &mut self,
-        subkey: B256,
-    ) -> Result<Option<(B256, Self::Value)>, reth_db::DatabaseError> {
+    fn seek(&mut self, subkey: B256) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.hashed_storage(self.hashed_address, subkey) {
                 return Ok(Some((subkey, value)));

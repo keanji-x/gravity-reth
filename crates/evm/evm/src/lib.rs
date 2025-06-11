@@ -60,6 +60,15 @@ pub use alloy_evm::block::state_changes as state_change;
 /// State trait for EVM.
 pub mod state;
 
+pub trait ParallelDatabase:
+    revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync
+{
+}
+impl<T> ParallelDatabase for T where
+    T: revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync
+{
+}
+
 /// A complete configuration of EVM for Reth.
 ///
 /// This trait encapsulates complete configuration required for transaction execution and block

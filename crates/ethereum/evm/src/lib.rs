@@ -47,7 +47,7 @@ use reth_ethereum_forks::EthereumHardfork;
 pub mod execute;
 //pub mod parallel_execute;
 
-mod debug_ext;
+//mod debug_ext;
 
 mod build;
 pub use build::EthBlockAssembler;

@@ -4,8 +4,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
     HashedPostStateProvider, HeaderProvider, HeaderSyncGapProvider, ProviderError,
-    PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
-    TransactionVariant, TransactionsProvider,
+    PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StateProviderOptions,
+    StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::transaction::TransactionMeta;
 use alloy_eips::BlockHashOrNumber;

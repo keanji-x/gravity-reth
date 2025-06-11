@@ -5,8 +5,8 @@ use crate::{
     BlockReader, BlockReaderIdExt, BlockSource, ChangeSetReader, HashedPostStateProvider,
     HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader, ReceiptProvider,
     ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider, StateProvider,
-    StateProviderBox, StateProviderFactory, StateRootProvider, StorageRootProvider,
-    TransactionVariant, TransactionsProvider,
+    StateProviderBox, StateProviderFactory, StateProviderOptions, StateRootProvider,
+    StorageRootProvider, TransactionVariant, TransactionsProvider,
 };
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use alloy_consensus::transaction::TransactionMeta;
@@ -466,7 +466,7 @@ impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
 }
 
 impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopProvider<C, N> {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -500,11 +500,19 @@ impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopP
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -512,7 +520,11 @@ impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopP
         Ok(Box::new(self.clone()))
     }
 
-    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash_with_opts(
+        &self,
+        _block_hash: B256,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
     }
 }

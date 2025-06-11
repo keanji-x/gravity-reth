@@ -17,7 +17,7 @@ use reth_primitives_traits::{
 };
 use reth_storage_api::{PersistBlockCache, StateProviderBox, USE_STORAGE_CACHE};
 use reth_trie::{updates::TrieUpdates, HashedPostState};
-use revm::db::OriginalValuesKnown;
+use revm_database::OriginalValuesKnown;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -930,12 +930,6 @@ impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
     #[inline]
     pub fn trie_updates(&self) -> Option<&TrieUpdates> {
         self.trie.as_ref()
-    }
-
-    /// Converts the value into [`SealedBlock`].
-    pub fn into_sealed_block(self) -> SealedBlock<N::Block> {
-        let block = Arc::unwrap_or_clone(self.block.recovered_block);
-        block.into_sealed_block()
     }
 
     /// Converts the value into [`SealedBlock`].

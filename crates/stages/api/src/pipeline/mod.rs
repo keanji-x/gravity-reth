@@ -5,6 +5,7 @@ use crate::{LatestStateProviderFactory, PipelineTarget, StageCheckpoint, StageId
 use alloy_primitives::{BlockNumber, B256};
 pub use event::*;
 use futures_util::Future;
+use reth_errors::ProviderResult;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, ChainStateBlockReader,
