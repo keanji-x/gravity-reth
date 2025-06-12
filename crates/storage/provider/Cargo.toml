@@ -86,6 +86,7 @@ tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 alloy-consensus.workspace = true
 
 [features]
+pipe_test = []
 test-utils = [
     "reth-db/test-utils",
     "reth-nippy-jar/test-utils",

@@ -166,6 +166,8 @@ where
         } in blocks
         {
             let block_hash = recovered_block.hash();
+
+            #[cfg(not(feature = "pipe_test"))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
 
