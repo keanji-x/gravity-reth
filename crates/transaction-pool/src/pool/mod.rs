@@ -88,18 +88,25 @@ use crate::{
     TransactionValidator,
 };
 
+use alloy_eips::{
+    eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant, Typed2718,
+};
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
+use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
-use tokio::sync::Notify;
-use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant, Typed2718};
 use reth_primitives_traits::Recovered;
 use rustc_hash::FxHashMap;
-use dashmap::DashMap;
-use std::{collections::HashSet, fmt, sync::{atomic::AtomicU64, Arc}, time::{Duration, Instant}, usize};
-use tokio::sync::mpsc;
+use std::{
+    collections::HashSet,
+    fmt,
+    sync::{atomic::AtomicU64, Arc},
+    time::{Duration, Instant},
+    usize,
+};
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, trace, warn};
 mod events;
 pub use best::{BestTransactionFilter, BestTransactionsWithPrioritizedSenders};
@@ -127,10 +134,7 @@ pub const NEW_TX_LISTENER_BUFFER_SIZE: usize = 1024;
 
 const BLOB_SIDECAR_LISTENER_BUFFER_SIZE: usize = 512;
 
-type BatchItem<T: PoolTransaction> = (
-    TransactionOrigin,
-    T,
-);
+type BatchItem<T: PoolTransaction> = (TransactionOrigin, T);
 
 pub struct TxBuffer<T: PoolTransaction> {
     buffer: Vec<BatchItem<T>>,
@@ -155,14 +159,14 @@ static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
 fn get_batch_insert_time() -> u64 {
     let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     if val == 0 {
-        let size = std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
+        let size =
+            std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
         assert!(size > 0, "BATCH_INSERT_TIME must be greater than 0");
         BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Release);
         return BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     }
     val
 }
-
 
 /// Transaction pool internals.
 pub struct PoolInner<V, T, S>
@@ -218,7 +222,11 @@ where
             config,
             blob_store,
             blob_store_metrics: Default::default(),
-            buffer: tokio::sync::Mutex::new(TxBuffer { buffer: Vec::new(), event: Arc::new(Notify::new()), full_notify: Arc::new(Notify::new()) }),
+            buffer: tokio::sync::Mutex::new(TxBuffer {
+                buffer: Vec::new(),
+                event: Arc::new(Notify::new()),
+                full_notify: Arc::new(Notify::new()),
+            }),
             add_txn_res: DashMap::new(),
             txn_insert_time: DashMap::new(),
         }
@@ -582,9 +590,7 @@ where
     }
 
     /// Task responsible for receiving transactions and processing them in batches.
-    pub async fn batch_add_transactions_task(
-        self: Arc<Self>,
-    ) {
+    pub async fn batch_add_transactions_task(self: Arc<Self>) {
         info!("Batch insert task started with batch time {}", get_batch_insert_time());
         let sleep_duration = Duration::from_millis(get_batch_insert_time());
         let mut duration = Duration::from_millis(0);
@@ -598,9 +604,7 @@ where
 
     /// Processes a batch of transactions, adds them to the pool,
     /// stores results in the shared DashMap, and handles discarded transactions.
-    async fn process_batch_and_store_results(
-        &self
-    ) {
+    async fn process_batch_and_store_results(&self) {
         let system_time_start = std::time::SystemTime::now();
         let start = Instant::now();
         let mut buffer = self.buffer.lock().await;
@@ -618,7 +622,8 @@ where
             TxHash,
             TransactionValidationOutcome<T::Transaction>,
         )> = Vec::with_capacity(num_items);
-        let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
+        let origins: Vec<TransactionOrigin> =
+            items_to_process.iter().map(|(origin, _)| *origin).collect();
         let outcomes = self.validator().validate_transactions(items_to_process).await;
         self.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
         self.blob_store_metrics.txn_batch_number.record(num_items as f64);
@@ -626,7 +631,10 @@ where
 
         self.txn_insert_time.clear();
         for (tx_outcome, origin) in outcomes.into_iter().zip(origins) {
-            self.txn_insert_time.insert(tx_outcome.tx_hash(), system_time_start.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
+            self.txn_insert_time.insert(
+                tx_outcome.tx_hash(),
+                system_time_start.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+            );
             origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
         }
 
@@ -634,7 +642,7 @@ where
 
         // --- Pool Write Lock Scope ---
         let mut pool_guard = self.pool.write(); // Assuming self.pool exists and is behind a lock
-        
+
         for (origin, tx_hash, tx_outcome) in origins_hashes_and_outcomes {
             // Add transaction to the underlying pool
             let res = self.add_transaction(&mut pool_guard, origin, tx_outcome); // Assuming this fn exists
@@ -653,13 +661,13 @@ where
 
         // Handle discarding worst transactions if new ones were added
         let discarded_pool_transactions = if !successfully_added_hashes_in_batch.is_empty() {
-            pool_guard.discard_worst() // Assuming this returns Vec<DiscardedTransactionInfo> or similar
+            pool_guard.discard_worst() // Assuming this returns Vec<DiscardedTransactionInfo> or
+                                       // similar
         } else {
             Vec::default()
         };
         // --- End Pool Write Lock Scope ---
         drop(pool_guard); // Release lock explicitly
-        
 
         // Post-processing for discarded transactions (outside the main pool lock if possible)
         if !discarded_pool_transactions.is_empty() {
@@ -672,15 +680,14 @@ where
                 .collect();
 
             // Notify listeners about discarded transactions
-            { // Scope for listener lock
+            {
+                // Scope for listener lock
                 let mut listener_guard = self.event_listener.write(); // Assuming this exists
-                discarded_hashes_set
-                    .iter()
-                    .for_each(|hash| listener_guard.discarded(hash));
+                discarded_hashes_set.iter().for_each(|hash| listener_guard.discarded(hash));
             }
 
-
-            // Update the results in the DashMap for transactions that were initially added but then discarded
+            // Update the results in the DashMap for transactions that were initially added but then
+            // discarded
             for hash in discarded_hashes_set {
                 // Use entry API for atomic update: find the entry and modify it if it was Ok.
                 self.add_txn_res.entry(hash).and_modify(|result| {
@@ -713,7 +720,6 @@ where
         notify.notified().await;
         self.add_txn_res.remove(&hash).unwrap().1
     }
-    
 
     /// Adds all transactions in the iterator to the pool, returning a list of results.
     ///
@@ -1386,7 +1392,11 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        blobstore::{BlobStore, InMemoryBlobStore}, pool::txpool, test_utils::{MockTransaction, TestPoolBuilder}, validate::ValidTransaction, BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256
+        blobstore::{BlobStore, InMemoryBlobStore},
+        pool::txpool,
+        test_utils::{MockTransaction, TestPoolBuilder},
+        validate::ValidTransaction,
+        BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
     };
     use alloy_eips::eip4844::BlobTransactionSidecar;
     use reth_primitives::kzg::Blob;
@@ -1397,22 +1407,27 @@ mod tests {
         // Define the maximum limit for blobs in the sub-pool.
         let blob_limit = SubPoolLimit::new(usize::MAX, usize::MAX);
         let test_pool = &TestPoolBuilder::default()
-            .with_config(PoolConfig { blob_limit, pending_limit: blob_limit, queued_limit: blob_limit, ..Default::default() })
+            .with_config(PoolConfig {
+                blob_limit,
+                pending_limit: blob_limit,
+                queued_limit: blob_limit,
+                ..Default::default()
+            })
             .pool;
         let mut txns_vec = vec![];
         let init_size = 10000000;
         for _ in 0..init_size {
-            test_pool.add_transactions(TransactionOrigin::Local, 
-            vec![
-                TransactionValidationOutcome::Valid {
+            test_pool.add_transactions(
+                TransactionOrigin::Local,
+                vec![TransactionValidationOutcome::Valid {
                     balance: U256::from(1_000),
                     state_nonce: 0,
                     transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
                     propagate: true,
                     bytecode_hash: None,
                     authorities: None,
-                },
-            ]);
+                }],
+            );
         }
         let size = 1000;
         for i in 0..size {

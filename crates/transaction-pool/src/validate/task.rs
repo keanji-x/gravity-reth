@@ -176,24 +176,32 @@ where
                     let _ = tx.send(res);
                 });
                 let to_validation_task = to_validation_task.lock().await;
-                to_validation_task
-                    .send(fut)
-                    .await
+                to_validation_task.send(fut).await
             };
             if res.is_err() {
-                return hashes.into_iter().map(|hash| TransactionValidationOutcome::Error(
-                    hash,
-                    Box::new(TransactionValidatorError::ValidationServiceUnreachable),
-                )).collect();
+                return hashes
+                    .into_iter()
+                    .map(|hash| {
+                        TransactionValidationOutcome::Error(
+                            hash,
+                            Box::new(TransactionValidatorError::ValidationServiceUnreachable),
+                        )
+                    })
+                    .collect();
             }
         }
 
         match rx.await {
             Ok(res) => res,
-            Err(_) => hashes.into_iter().map(|hash| TransactionValidationOutcome::Error(
-                hash,
-                Box::new(TransactionValidatorError::ValidationServiceUnreachable),
-            )).collect(),
+            Err(_) => hashes
+                .into_iter()
+                .map(|hash| {
+                    TransactionValidationOutcome::Error(
+                        hash,
+                        Box::new(TransactionValidatorError::ValidationServiceUnreachable),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -213,9 +221,7 @@ where
                     let _ = tx.send(res);
                 });
                 let to_validation_task = to_validation_task.lock().await;
-                to_validation_task
-                    .send(fut)
-                    .await
+                to_validation_task.send(fut).await
             };
             if res.is_err() {
                 return TransactionValidationOutcome::Error(
@@ -233,7 +239,6 @@ where
             ),
         }
     }
-
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
     where

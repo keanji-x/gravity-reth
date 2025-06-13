@@ -130,19 +130,21 @@ pub struct StateProviderOptions {
     pub cache: Option<PersistBlockCache>,
 }
 
-pub static USE_STORAGE_CACHE: LazyLock<bool> = LazyLock::new(|| std::env::var("USE_STORAGE_CACHE").is_ok());
+pub static USE_STORAGE_CACHE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("USE_STORAGE_CACHE").is_ok());
 
 /// General options for state providers.
-pub static STATE_PROVIDER_OPTS: LazyLock<StateProviderOptions> = LazyLock::new(|| StateProviderOptions {
-    parallel: NonZero::new(
-        std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8),
-    )
-    .unwrap(),
-    cache: None,
-});
+pub static STATE_PROVIDER_OPTS: LazyLock<StateProviderOptions> =
+    LazyLock::new(|| StateProviderOptions {
+        parallel: NonZero::new(
+            std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
+        )
+        .unwrap(),
+        cache: None,
+    });
 
 impl Default for StateProviderOptions {
     fn default() -> Self {

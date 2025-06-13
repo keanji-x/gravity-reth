@@ -237,10 +237,13 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         let executor = executor_provider.batch_executor(state_db);
 
         let output = executor
-            .execute_with_state_closure(&(*block).clone(), |statedb: &dyn reth_evm::state::State| {
-                // TODO(nekomoto911): witness_record.record_executed_state(statedb);
-                todo!()
-            })
+            .execute_with_state_closure(
+                &(*block).clone(),
+                |statedb: &dyn reth_evm::state::State| {
+                    // TODO(nekomoto911): witness_record.record_executed_state(statedb);
+                    todo!()
+                },
+            )
             .map_err(|_| Error::BlockProcessingFailed { block_number })?;
 
         // Consensus checks after block execution

@@ -184,7 +184,13 @@ use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
 use reth_primitives_traits::{Block, Recovered};
 use reth_storage_api::StateProviderFactory;
-use std::{collections::HashSet, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, AtomicU8},
+        Arc,
+    },
+};
 use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{instrument, trace};
 
@@ -243,7 +249,11 @@ where
     /// Create a new transaction pool instance.
     pub fn new(validator: V, ordering: T, blob_store: S, config: PoolConfig) -> Self {
         let pool = Arc::new(PoolInner::new(validator, ordering, blob_store, config));
-        Self { pool, batch_insert_task_handle: Arc::new(Mutex::new(None)), batch_insert_task_running: Arc::new(AtomicBool::new(false)) }
+        Self {
+            pool,
+            batch_insert_task_handle: Arc::new(Mutex::new(None)),
+            batch_insert_task_running: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Returns the wrapped pool.
@@ -390,11 +400,9 @@ where
         let start = std::time::Instant::now();
         let pool = self.pool.clone();
         if self.batch_insert_task_running.load(std::sync::atomic::Ordering::Acquire) {
-            return self.pool
-                    .send_transaction(origin, transaction)
-                    .await
+            return self.pool.send_transaction(origin, transaction).await
         }
-        if get_enable_batch_insert()  {
+        if get_enable_batch_insert() {
             {
                 let mut handle = self.batch_insert_task_handle.lock().await;
                 if handle.is_none() {
@@ -410,7 +418,10 @@ where
         let (_, tx) = self.validate(origin, transaction).await;
         self.pool.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
-        self.pool.blob_store_metrics.txn_val_insertion_time.record(start.elapsed().as_millis() as f64);
+        self.pool
+            .blob_store_metrics
+            .txn_val_insertion_time
+            .record(start.elapsed().as_millis() as f64);
         results.pop().expect("result length is the same as the input")
     }
 
@@ -703,6 +714,10 @@ where
 
 impl<V: 'static, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
     fn clone(&self) -> Self {
-        Self { pool: Arc::clone(&self.pool), batch_insert_task_handle: self.batch_insert_task_handle.clone(), batch_insert_task_running: self.batch_insert_task_running.clone() }
+        Self {
+            pool: Arc::clone(&self.pool),
+            batch_insert_task_handle: self.batch_insert_task_handle.clone(),
+            batch_insert_task_running: self.batch_insert_task_running.clone(),
+        }
     }
 }
