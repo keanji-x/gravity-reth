@@ -494,24 +494,24 @@ reth-ress-protocol = { path = "crates/ress/protocol" }
 reth-ress-provider = { path = "crates/ress/provider" }
 
 # revm
-revm = { version = "24.0.1", default-features = false }
-revm-bytecode = { version = "4.0.0", default-features = false }
-revm-database = { version = "4.0.0", default-features = false }
-revm-state = { version = "4.0.0", default-features = false }
-revm-primitives = { version = "19.0.0", default-features = false }
-revm-interpreter = { version = "20.0.0", default-features = false }
-revm-inspector = { version = "5.0.0", default-features = false }
-revm-context = { version = "5.0.0", default-features = false }
-revm-context-interface = { version = "5.0.0", default-features = false }
-revm-database-interface = { version = "4.0.0", default-features = false }
-op-revm = { version = "5.0.0", default-features = false }
-revm-inspectors = "0.23.0"
+revm = { package = "revm", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-bytecode = { package = "revm-bytecode", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-database = { package = "revm-database", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-state = { package = "revm-state", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-primitives = { package = "revm-primitives", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-interpreter = { package = "revm-interpreter", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-inspector = { package = "revm-inspector", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-context = { package = "revm-context", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-context-interface = { package = "revm-context-interface", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-database-interface = { package = "revm-database-interface", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+op-revm = { package = "op-revm", git = "https://github.com/Galxe/revm", rev = "719cd933", default-features = false }
+revm-inspectors = { package = "revm-inspectors", git = "https://github.com/Galxe/revm-inspectors", rev = "bd5cd5a" }
 
 # eth
 alloy-chains = { version = "0.2.0", default-features = false }
 alloy-dyn-abi = "1.1.0"
 alloy-eip2124 = { version = "0.2.0", default-features = false }
-alloy-evm = { version = "0.10", default-features = false }
+alloy-evm = { package = "alloy-evm", git = "https://github.com/Galxe/alloy-evm", rev = "85e6450", default-features = false }
 alloy-primitives = { version = "1.1.0", default-features = false, features = ["map-foldhash"] }
 alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
 alloy-sol-macro = "1.1.0"

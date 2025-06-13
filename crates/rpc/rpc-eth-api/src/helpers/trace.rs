@@ -361,7 +361,7 @@ pub trait Trace:
                         tx,
                         &mut inspector,
                     )?;
-                    let ResultAndState { result, state } = res;
+                    let ResultAndState { result, state, .. } = res;
                     results.push(f(tx_info, inspector, result, &state, &db)?);
 
                     // need to apply the state changes of this transaction before executing the
