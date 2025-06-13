@@ -21,6 +21,7 @@ reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
 
 revm.workspace = true
+grevm.workspace = true
 
 # alloy
 alloy-primitives.workspace = true

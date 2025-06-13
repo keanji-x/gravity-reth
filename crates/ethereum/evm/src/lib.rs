@@ -45,7 +45,7 @@ pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
 use reth_ethereum_forks::EthereumHardfork;
 
 pub mod execute;
-//pub mod parallel_execute;
+pub mod parallel_execute;
 
 //mod debug_ext;
 
