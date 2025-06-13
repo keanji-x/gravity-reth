@@ -19,7 +19,7 @@ use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{execute::Executor, ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase};
-use reth_evm_ethereum::EthEvmConfig;
+use reth_evm_ethereum::{new_parallel_executor, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{EthPrimitives, NodePrimitives};
 use reth_primitives_traits::{
@@ -425,7 +425,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let executor = self.evm_config.executor(WrapDatabaseRef(state));
+        let executor = new_parallel_executor(&self.evm_config, state);
 
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(

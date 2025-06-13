@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+use crate::parallel_execute::GrevmExecutor;
 use alloc::{borrow::Cow, sync::Arc};
 use alloy_consensus::{BlockHeader, Header};
 pub use alloy_evm::EthEvm;
@@ -30,7 +31,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes,
-    TransactionEnv,
+    ParallelDatabase, TransactionEnv,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
@@ -266,6 +267,16 @@ where
             withdrawals: attributes.withdrawals.map(Cow::Owned),
         }
     }
+}
+
+pub fn new_parallel_executor<DB>(
+    evm_config: &EthEvmConfig,
+    db: DB,
+) -> GrevmExecutor<DB, EthEvmConfig>
+where
+    DB: ParallelDatabase,
+{
+    GrevmExecutor::new(evm_config.chain_spec().clone(), evm_config, db)
 }
 
 #[cfg(test)]

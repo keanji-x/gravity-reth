@@ -1,3 +1,4 @@
+use crate::RethReceiptBuilder;
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
@@ -23,9 +24,8 @@ use reth_primitives_traits::{
     Block as _, BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction,
 };
 use revm::{
-    database::WrapDatabaseRef,
+    database::{states::bundle_state::BundleRetention, WrapDatabaseRef},
     state::{Account, AccountStatus, EvmState},
-    DatabaseCommit,
 };
 
 pub struct GrevmExecutor<DB, EvmConfig> {
@@ -42,16 +42,19 @@ pub struct GrevmExecutor<DB, EvmConfig> {
 impl<DB, EvmConfig> GrevmExecutor<DB, EvmConfig>
 where
     EvmConfig: Clone
-        + ConfigureEvm<Primitives = EthPrimitives, BlockExecutorFactory = EthBlockExecutorFactory>,
+        + ConfigureEvm<
+            Primitives = EthPrimitives,
+            BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+        >,
     DB: ParallelDatabase,
 {
     /// Creates a new [`GrevmExecutor`]
-    pub fn new(db: DB, chain_spec: Arc<ChainSpec>, evm_config: EvmConfig) -> Self {
+    pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
         Self {
             state: Some(ParallelState::new(db, true, false)),
             chain_spec,
-            evm_config,
+            evm_config: evm_config.clone(),
             system_caller,
         }
     }
@@ -178,8 +181,10 @@ where
 
 impl<'db, DB, EvmConfig> Executor<'db> for GrevmExecutor<DB, EvmConfig>
 where
-    EvmConfig: Clone
-        + ConfigureEvm<Primitives = EthPrimitives, BlockExecutorFactory = EthBlockExecutorFactory>,
+    EvmConfig: ConfigureEvm<
+        Primitives = EthPrimitives,
+        BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+    >,
     DB: ParallelDatabase + 'db,
 {
     type Error = BlockExecutionError;
@@ -191,8 +196,13 @@ where
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
         self.apply_pre_execution_changes(block)?;
-        let ExecuteOutput { receipts, gas_used } = self.execute_transactions(block)?;
+        let ExecuteOutput { receipts, gas_used } = if block.transaction_count() == 0 {
+            ExecuteOutput { receipts: Vec::new(), gas_used: 0 }
+        } else {
+            self.execute_transactions(block)?
+        };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
+        self.state_mut().merge_transitions(BundleRetention::Reverts);
         Ok(BlockExecutionResult { receipts, gas_used, requests })
     }
 
