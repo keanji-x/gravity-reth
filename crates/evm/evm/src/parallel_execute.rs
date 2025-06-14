@@ -23,6 +23,11 @@ pub trait ParallelExecutor {
     /// Takes the BundleState changeset from the State, replacing it with an empty one.
     fn take_bundle(&mut self) -> BundleState;
 
+    /// The size hint of the batch's tracked state size.
+    ///
+    /// This is used to optimize DB commits depending on the size of the state.
+    fn size_hint(&self) -> usize;
+
     /// Consumes the type and executes the block.
     ///
     /// # Note
@@ -67,5 +72,10 @@ impl<'a, T: Executor<'a>> ParallelExecutor for WrapExecutor<'a, T> {
     #[inline]
     fn take_bundle(&mut self) -> BundleState {
         self.0.state_mut().take_bundle()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> usize {
+        self.0.state_mut().bundle_size_hint()
     }
 }

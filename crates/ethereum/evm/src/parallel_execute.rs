@@ -212,6 +212,13 @@ where
     fn take_bundle(&mut self) -> BundleState {
         self.state.as_mut().expect("state should be set before calling take_bundle").take_bundle()
     }
+
+    fn size_hint(&self) -> usize {
+        self.state
+            .as_ref()
+            .expect("state should be set before calling size_hint")
+            .bundle_size_hint()
+    }
 }
 
 #[inline]

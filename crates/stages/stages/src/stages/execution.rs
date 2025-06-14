@@ -417,7 +417,7 @@ where
         } else {
             Box::new(LatestStateProviderRef::new(provider, None))
         };
-        let mut executor = self.evm_config.batch_executor(StateProviderDatabase(db));
+        let mut executor = self.evm_config.parallel_executor(StateProviderDatabase(db));
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -518,11 +518,7 @@ where
 
         // prepare execution output for writing
         let time = Instant::now();
-        let mut state = ExecutionOutcome::from_blocks(
-            start_block,
-            executor.into_state().take_bundle(),
-            results,
-        );
+        let mut state = ExecutionOutcome::from_blocks(start_block, executor.take_bundle(), results);
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
