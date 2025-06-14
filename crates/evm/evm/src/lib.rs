@@ -31,6 +31,7 @@ use alloy_evm::{
 use alloy_primitives::{Address, B256};
 use core::{error::Error, fmt::Debug};
 use execute::{BasicBlockExecutor, BlockAssembler, BlockBuilder};
+use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
@@ -39,7 +40,8 @@ use revm::{context::TxEnv, database::State};
 pub mod either;
 /// EVM environment configuration.
 pub mod execute;
-// pub mod parallel_execute;
+pub mod parallel_execute;
+use parallel_execute::ParallelExecutor;
 
 mod aliases;
 pub use aliases::*;
@@ -303,6 +305,12 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     fn batch_executor<DB: Database>(&self, db: DB) -> BasicBlockExecutor<&Self, DB> {
         BasicBlockExecutor::new(self, db)
     }
+
+    /// Returns a new [`ParallelExecutor`].
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>;
 }
 
 /// Represents additional attributes required to configure the next block.

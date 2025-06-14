@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use crate::parallel_execute::GrevmExecutor;
-use alloc::{borrow::Cow, sync::Arc};
+use alloc::{borrow::Cow, boxed::Box, sync::Arc};
 use alloy_consensus::{BlockHeader, Header};
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
@@ -27,16 +27,20 @@ use alloy_evm::{
 };
 use alloy_primitives::{Bytes, U256};
 use core::{convert::Infallible, fmt::Debug};
+use gravity_primitives::CONFIG;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{
-    precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes,
-    ParallelDatabase, TransactionEnv,
+    execute::{BasicBlockExecutor, BlockExecutionError},
+    parallel_execute::{ParallelExecutor, WrapExecutor},
+    precompiles::PrecompilesMap,
+    ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes, ParallelDatabase, TransactionEnv,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
     context::{BlockEnv, CfgEnv},
     context_interface::block::BlobExcessGasAndPrice,
+    database::WrapDatabaseRef,
     primitives::hardfork::SpecId,
 };
 
@@ -112,25 +116,11 @@ impl<EvmFactory> EthEvmConfig<EvmFactory> {
     }
 }
 
-impl<EvmF> ConfigureEvm for EthEvmConfig<EvmF>
-where
-    EvmF: EvmFactory<
-            Tx: TransactionEnv
-                    + FromRecoveredTx<TransactionSigned>
-                    + FromTxWithEncoded<TransactionSigned>,
-            Spec = SpecId,
-            Precompiles = PrecompilesMap,
-        > + Clone
-        + Debug
-        + Send
-        + Sync
-        + Unpin
-        + 'static,
-{
+impl ConfigureEvm for EthEvmConfig {
     type Primitives = EthPrimitives;
     type Error = Infallible;
     type NextBlockEnvCtx = NextBlockEnvAttributes;
-    type BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>;
+    type BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>;
     type BlockAssembler = EthBlockAssembler<ChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
@@ -267,16 +257,18 @@ where
             withdrawals: attributes.withdrawals.map(Cow::Owned),
         }
     }
-}
 
-pub fn new_parallel_executor<DB>(
-    evm_config: &EthEvmConfig,
-    db: DB,
-) -> GrevmExecutor<DB, EthEvmConfig>
-where
-    DB: ParallelDatabase,
-{
-    GrevmExecutor::new(evm_config.chain_spec().clone(), evm_config, db)
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
+    {
+        if CONFIG.disable_grevm {
+            Box::new(WrapExecutor::from(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
+        } else {
+            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
+        }
+    }
 }
 
 #[cfg(test)]

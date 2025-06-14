@@ -13,9 +13,9 @@ use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
-        BlockExecutionError, BlockValidationError, ExecuteOutput, Executor,
-        InternalBlockExecutionError,
+        BlockExecutionError, BlockValidationError, ExecuteOutput, InternalBlockExecutionError,
     },
+    parallel_execute::ParallelExecutor,
     state::State,
     ConfigureEvm, OnStateHook, ParallelDatabase,
 };
@@ -24,7 +24,7 @@ use reth_primitives_traits::{
     Block as _, BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction,
 };
 use revm::{
-    database::{states::bundle_state::BundleRetention, WrapDatabaseRef},
+    database::{states::bundle_state::BundleRetention, BundleState, WrapDatabaseRef},
     state::{Account, AccountStatus, EvmState},
 };
 
@@ -179,13 +179,13 @@ where
     }
 }
 
-impl<'db, DB, EvmConfig> Executor<'db> for GrevmExecutor<DB, EvmConfig>
+impl<DB, EvmConfig> ParallelExecutor for GrevmExecutor<DB, EvmConfig>
 where
     EvmConfig: ConfigureEvm<
         Primitives = EthPrimitives,
         BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
     >,
-    DB: ParallelDatabase + 'db,
+    DB: ParallelDatabase,
 {
     type Error = BlockExecutionError;
     type Primitives = EvmConfig::Primitives;
@@ -202,34 +202,15 @@ where
             self.execute_transactions(block)?
         };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
-        self.state_mut().merge_transitions(BundleRetention::Reverts);
+        self.state
+            .as_mut()
+            .expect("state should be set before calling merge_transitions")
+            .merge_transitions(BundleRetention::Reverts);
         Ok(BlockExecutionResult { receipts, gas_used, requests })
     }
 
-    fn execute_one_with_state_hook<F>(
-        &mut self,
-        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
-        state_hook: F,
-    ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
-    where
-        F: OnStateHook + 'static,
-    {
-        todo!()
-    }
-
-    fn into_state(self) -> Box<dyn State + 'db> {
-        Box::new(self.state.expect("state should be set before calling into_state"))
-    }
-
-    fn state_mut(&mut self) -> &mut dyn State {
-        self.state.as_mut().expect("state should be set before calling state_mut")
-    }
-
-    fn size_hint(&self) -> usize {
-        self.state
-            .as_ref()
-            .expect("state should be set before calling size_hint")
-            .bundle_size_hint()
+    fn take_bundle(&mut self) -> BundleState {
+        self.state.as_mut().expect("state should be set before calling take_bundle").take_bundle()
     }
 }
 
