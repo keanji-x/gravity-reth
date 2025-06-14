@@ -185,13 +185,11 @@ where
             if !self.disallow.is_empty() {
                 // Check whether the submission interacted with any blacklisted account by scanning
                 // the `State`'s cache that records everything read form database during execution.
-                // TODO(nekomoto):
-                // for account in state.cache.accounts.keys() {
-                //     if self.disallow.contains(account) {
-                //         accessed_blacklisted = Some(*account);
-                //     }
-                // }
-                todo!()
+                for account in state.cache.accounts.keys() {
+                    if self.disallow.contains(account) {
+                        accessed_blacklisted = Some(*account);
+                    }
+                }
             }
         })?;
 

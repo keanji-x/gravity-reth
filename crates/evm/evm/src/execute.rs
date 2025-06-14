@@ -29,7 +29,7 @@ use revm::{
 
 /// A type that knows how to execute a block. It is assumed to operate on a
 /// [`crate::Evm`] internally and use [`State`] as database.
-pub trait Executor<'db>: Sized {
+pub trait Executor<DB: Database>: Sized {
     /// The primitive types used by the executor.
     type Primitives: NodePrimitives;
     /// The error type returned by the executor.
@@ -100,11 +100,11 @@ pub trait Executor<'db>: Sized {
         mut f: F,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     where
-        F: FnMut(&dyn crate::state::State),
+        F: FnMut(&State<DB>),
     {
         let result = self.execute_one(block)?;
         let mut state = self.into_state();
-        f(state.as_ref());
+        f(&state);
         Ok(BlockExecutionOutput { state: state.take_bundle(), result })
     }
 
@@ -124,10 +124,10 @@ pub trait Executor<'db>: Sized {
     }
 
     /// Consumes the executor and returns the [`State`] containing all state changes.
-    fn into_state(self) -> Box<dyn crate::state::State + 'db>;
+    fn into_state(self) -> State<DB>;
 
-    /// Returns a mutable reference to the current state.
-    fn state_mut(&mut self) -> &mut dyn crate::state::State;
+    /// Takes the BundleState changeset from the State, replacing it with an empty one.
+    fn take_bundle(&mut self) -> BundleState;
 
     /// The size hint of the batch's tracked state size.
     ///
@@ -422,10 +422,10 @@ impl<F, DB: Database> BasicBlockExecutor<F, DB> {
     }
 }
 
-impl<'db, F, DB> Executor<'db> for BasicBlockExecutor<F, DB>
+impl<F, DB> Executor<DB> for BasicBlockExecutor<F, DB>
 where
     F: ConfigureEvm,
-    DB: Database + 'db,
+    DB: Database,
 {
     type Primitives = F::Primitives;
     type Error = BlockExecutionError;
@@ -464,12 +464,12 @@ where
         Ok(result)
     }
 
-    fn into_state(self) -> Box<dyn crate::state::State + 'db> {
-        Box::new(self.db)
+    fn into_state(self) -> State<DB> {
+        self.db
     }
 
-    fn state_mut(&mut self) -> &mut dyn crate::state::State {
-        &mut self.db
+    fn take_bundle(&mut self) -> BundleState {
+        self.db.take_bundle()
     }
 
     fn size_hint(&self) -> usize {

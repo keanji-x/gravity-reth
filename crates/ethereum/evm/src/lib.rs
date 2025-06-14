@@ -23,18 +23,17 @@ use alloy_consensus::{BlockHeader, Header};
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
-    EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
+    EthEvmFactory,
 };
 use alloy_primitives::{Bytes, U256};
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::CONFIG;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
-use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
+use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BasicBlockExecutor, BlockExecutionError},
     parallel_execute::{ParallelExecutor, WrapExecutor},
-    precompiles::PrecompilesMap,
-    ConfigureEvm, EvmEnv, EvmFactory, NextBlockEnvAttributes, ParallelDatabase, TransactionEnv,
+    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
@@ -264,7 +263,7 @@ impl ConfigureEvm for EthEvmConfig {
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
     {
         if CONFIG.disable_grevm {
-            Box::new(WrapExecutor::from(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
+            Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
         } else {
             Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
         }

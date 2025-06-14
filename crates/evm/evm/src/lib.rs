@@ -60,9 +60,7 @@ pub use alloy_evm::{
 
 pub use alloy_evm::block::state_changes as state_change;
 
-/// State trait for EVM.
-pub mod state;
-
+/// Database abstraction for parallel execution.
 pub trait ParallelDatabase:
     revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync
 {

@@ -4,7 +4,7 @@ use alloy_rpc_types_debug::ExecutionWitness;
 use pretty_assertions::Comparison;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_engine_primitives::InvalidBlockHook;
-use reth_evm::{block::SystemCaller, ConfigureEvm, Evm};
+use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedHeader};
 use reth_provider::{BlockExecutionOutput, ChainSpecProvider, StateProviderFactory};
 use reth_revm::{database::StateProviderDatabase, db::BundleState, state::AccountInfo};
@@ -12,12 +12,9 @@ use reth_rpc_api::DebugApiClient;
 use reth_tracing::tracing::warn;
 use reth_trie::{updates::TrieUpdates, HashedStorage};
 use revm_bytecode::Bytecode;
-use revm_database::{
-    states::{
-        reverts::{AccountInfoRevert, RevertToSlot},
-        AccountStatus, StorageSlot,
-    },
-    StateBuilder,
+use revm_database::states::{
+    reverts::{AccountInfoRevert, RevertToSlot},
+    AccountStatus, StorageSlot,
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, fmt::Debug, fs::File, io::Write, path::PathBuf};
@@ -160,31 +157,15 @@ where
         N: NodePrimitives,
     {
         // TODO(alexey): unify with `DebugApi::debug_execution_witness`
-        // Setup database.
-        let mut db = StateBuilder::new()
-            .with_database(StateProviderDatabase::new(
-                self.provider.state_by_block_hash(parent_header.hash())?,
-            ))
-            .with_bundle_update()
-            .build();
 
-        // Setup EVM
-        let mut evm = self.evm_config.evm_for_block(&mut db, block.header());
+        let mut executor = self.evm_config.batch_executor(StateProviderDatabase::new(
+            self.provider.state_by_block_hash(parent_header.hash())?,
+        ));
 
-        let mut system_caller = SystemCaller::new(self.provider.chain_spec());
-
-        // Apply pre-block system contract calls.
-        system_caller.apply_pre_execution_changes(block.header(), &mut evm)?;
-
-        // Re-execute all of the transactions in the block to load all touched accounts into
-        // the cache DB.
-        for tx in block.transactions_recovered() {
-            evm.transact_commit(self.evm_config.tx_env(tx))?;
-        }
-
-        drop(evm);
+        executor.execute_one(block)?;
 
         // Take the bundle state
+        let mut db = executor.into_state();
         let mut bundle_state = db.take_bundle();
 
         // Initialize a map of preimages.

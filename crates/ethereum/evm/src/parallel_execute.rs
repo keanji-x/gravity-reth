@@ -16,13 +16,10 @@ use reth_evm::{
         BlockExecutionError, BlockValidationError, ExecuteOutput, InternalBlockExecutionError,
     },
     parallel_execute::ParallelExecutor,
-    state::State,
-    ConfigureEvm, OnStateHook, ParallelDatabase,
+    ConfigureEvm, ParallelDatabase,
 };
 use reth_execution_types::BlockExecutionResult;
-use reth_primitives_traits::{
-    Block as _, BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction,
-};
+use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
     database::{states::bundle_state::BundleRetention, BundleState, WrapDatabaseRef},
     state::{Account, AccountStatus, EvmState},

@@ -3,6 +3,7 @@
 use std::sync::LazyLock;
 
 /// Configuration options for the Gravity Reth.
+#[derive(Debug)]
 pub struct Config {
     /// Whether to disable the Grevm executor.
     pub disable_grevm: bool,
@@ -12,6 +13,7 @@ pub struct Config {
     pub use_parallel_state_root: bool,
 }
 
+/// Global configuration instance, initialized lazily.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| Config {
     disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
     use_storage_cache: std::env::var("GRETH_USE_STORAGE_CACHE").is_ok(),

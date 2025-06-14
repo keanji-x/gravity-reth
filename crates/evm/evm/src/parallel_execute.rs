@@ -3,6 +3,7 @@
 use core::marker::PhantomData;
 
 use crate::execute::Executor;
+use alloy_evm::Database;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
 use revm::database::BundleState;
@@ -47,16 +48,16 @@ pub trait ParallelExecutor {
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.
 #[derive(Debug)]
-pub struct WrapExecutor<'a, T: Executor<'a>>(pub T, PhantomData<&'a ()>);
+pub struct WrapExecutor<DB: Database, T: Executor<DB>>(pub T, PhantomData<DB>);
 
-impl<'a, T: Executor<'a>> From<T> for WrapExecutor<'a, T> {
-    #[inline]
-    fn from(f: T) -> Self {
-        Self(f, PhantomData)
+impl<DB: Database, T: Executor<DB>> WrapExecutor<DB, T> {
+    /// Creates a new `WrapExecutor` from the given executor.
+    pub fn new(executor: T) -> Self {
+        Self(executor, PhantomData)
     }
 }
 
-impl<'a, T: Executor<'a>> ParallelExecutor for WrapExecutor<'a, T> {
+impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     type Primitives = T::Primitives;
     type Error = T::Error;
 
@@ -71,11 +72,11 @@ impl<'a, T: Executor<'a>> ParallelExecutor for WrapExecutor<'a, T> {
 
     #[inline]
     fn take_bundle(&mut self) -> BundleState {
-        self.0.state_mut().take_bundle()
+        self.0.take_bundle()
     }
 
     #[inline]
     fn size_hint(&self) -> usize {
-        self.0.state_mut().bundle_size_hint()
+        self.0.size_hint()
     }
 }
