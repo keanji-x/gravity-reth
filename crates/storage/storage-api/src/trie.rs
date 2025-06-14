@@ -1,10 +1,11 @@
 use alloc::vec::Vec;
 use alloy_primitives::{map::B256Map, Address, Bytes, B256};
+use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::{
     updates::{StorageTrieUpdates, TrieUpdates},
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-    StorageProof, TrieInput,
+    StorageProof, TrieInput, TrieInputV2,
 };
 use std::sync::Arc;
 
@@ -137,4 +138,8 @@ pub trait StorageTrieWriter: Send + Sync {
         hashed_address: B256,
         updates: &StorageTrieUpdates,
     ) -> ProviderResult<usize>;
+}
+
+pub trait TrieWriterV2 {
+    fn write(&self, input: TrieInputV2) -> Result<usize, DatabaseError>;
 }
