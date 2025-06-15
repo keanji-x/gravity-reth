@@ -8,7 +8,7 @@ use alloy_evm::{
     EvmEnv,
 };
 use alloy_primitives::{map::HashMap, Address};
-use grevm::{ParallelState, Scheduler};
+use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
@@ -21,7 +21,9 @@ use reth_evm::{
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
-    database::{states::bundle_state::BundleRetention, BundleState, WrapDatabaseRef},
+    database::{
+        states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
+    },
     state::{Account, AccountStatus, EvmState},
 };
 
@@ -199,10 +201,16 @@ where
             self.execute_transactions(block)?
         };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
-        self.state
-            .as_mut()
-            .expect("state should be set before calling merge_transitions")
-            .merge_transitions(BundleRetention::Reverts);
+        let state_mut =
+            self.state.as_mut().expect("state should be set before calling merge_transitions");
+        if let Some(transition_state) =
+            state_mut.transition_state.as_mut().map(TransitionState::take)
+        {
+            state_mut.bundle_state.parallel_apply_transitions_and_create_reverts(
+                transition_state,
+                BundleRetention::Reverts,
+            );
+        }
         Ok(BlockExecutionResult { receipts, gas_used, requests })
     }
 
