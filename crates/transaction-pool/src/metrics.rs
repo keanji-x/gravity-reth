@@ -81,6 +81,8 @@ pub struct BlobStoreMetrics {
     pub(crate) txn_val_insertion_time: Histogram,
     /// txn batch number
     pub(crate) txn_batch_number: Histogram,
+    /// on_canonical_state_change time
+    pub(crate) on_canonical_state_change_time: Histogram,
 }
 
 /// Transaction pool maintenance metrics

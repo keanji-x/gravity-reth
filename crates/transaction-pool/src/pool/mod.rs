@@ -450,7 +450,7 @@ where
         self.validator.on_new_head_block(new_tip);
 
         let changed_senders = self.changed_senders(changed_accounts.into_iter());
-
+        let start = Instant::now();
         // update the pool
         let outcome = self.pool.write().on_canonical_state_change(
             block_info,
@@ -464,6 +464,9 @@ where
 
         // notify listeners about updates
         self.notify_on_new_state(outcome);
+        self.blob_store_metrics.on_canonical_state_change_time.record(
+            start.elapsed().as_millis() as f64,
+        );
     }
 
     /// Performs account updates on the pool.
