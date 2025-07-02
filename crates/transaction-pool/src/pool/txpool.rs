@@ -1685,7 +1685,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         tx_hash: &B256,
     ) -> Option<(Arc<ValidPoolTransaction<T>>, SubPool)> {
         let tx = self.by_hash.remove(tx_hash)?;
-        let internal = self.txs.remove(&tx.transaction_id)?;
+        let internal = self.txs.get_mut(&tx.sender_id()).unwrap().remove(&tx.transaction_id)?;
         self.remove_auths(&internal);
         // decrement the counter for the sender.
         self.tx_decr(tx.sender_id());

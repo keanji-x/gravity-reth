@@ -40,11 +40,8 @@ use revm::{context::TxEnv, database::State};
 pub mod either;
 /// EVM environment configuration.
 pub mod execute;
-<<<<<<< HEAD
 pub mod parallel_execute;
 use parallel_execute::ParallelExecutor;
-=======
->>>>>>> v1.5.0
 
 mod aliases;
 pub use aliases::*;

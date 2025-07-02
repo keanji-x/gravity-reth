@@ -543,7 +543,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         opts: StateProviderOptions,
     ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_hash, "Getting history by block hash");
-        self.consistent_provider()?.into_state_provider_at_block_hash(block_hash, opts)
+        self.consistent_provider()?.into_state_provider_at_block_hash(block_hash)
     }
 
     fn state_by_block_hash_with_opts(

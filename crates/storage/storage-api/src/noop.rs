@@ -2,10 +2,10 @@
 
 use crate::{
     AccountReader, BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader,
-    BlockReader, BlockReaderIdExt, BlockSource, ChangeSetReader, HashedPostStateProvider,
-    HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader, ReceiptProvider,
-    ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider, StateProvider,
-    StateProviderBox, StateProviderFactory, StateProviderOptions, StateRootProvider,
+    BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader, ChangeSetReader,
+    HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader,
+    ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateProviderOptions, StateRootProvider,
     StorageRootProvider, TransactionVariant, TransactionsProvider,
 };
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
@@ -455,24 +455,16 @@ impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
     ) -> ProviderResult<Option<StorageValue>> {
         Ok(None)
     }
-<<<<<<< HEAD
-
-=======
 }
 
 impl<C: Send + Sync, N: NodePrimitives> BytecodeReader for NoopProvider<C, N> {
->>>>>>> v1.5.0
     fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         Ok(None)
     }
 }
 
 impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopProvider<C, N> {
-<<<<<<< HEAD
     fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
-=======
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
->>>>>>> v1.5.0
         Ok(Box::new(self.clone()))
     }
 

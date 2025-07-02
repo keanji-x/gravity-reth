@@ -182,11 +182,7 @@ where
         origin: TransactionOrigin,
         transactions: impl IntoIterator<Item = Self::Transaction> + Send,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-<<<<<<< HEAD
-        self.validate_all_with_origin(origin, transactions)
-=======
         self.inner.validate_batch_with_origin(origin, transactions)
->>>>>>> v1.5.0
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
@@ -270,20 +266,14 @@ where
     fn validate_one_with_provider(
         &self,
         origin: TransactionOrigin,
-<<<<<<< HEAD
         mut transaction: Tx,
         maybe_state: &mut Option<BlockViewProvider>,
-=======
-        transaction: Tx,
-        maybe_state: &mut Option<Box<dyn AccountInfoReader>>,
->>>>>>> v1.5.0
     ) -> TransactionValidationOutcome<Tx> {
         match self.validate_one_no_state(origin, transaction) {
             Ok(transaction) => {
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
-<<<<<<< HEAD
                     match self
                         .client
                         .latest_with_opts(StateProviderOptions::default().with_raw_db())
@@ -294,11 +284,6 @@ where
                                 Some(PERSIST_BLOCK_CACHE.clone()),
                             );
                             *maybe_state = Some(state_with_cache);
-=======
-                    match self.client.latest() {
-                        Ok(new_state) => {
-                            *maybe_state = Some(Box::new(new_state));
->>>>>>> v1.5.0
                         }
                         Err(err) => {
                             return TransactionValidationOutcome::Error(
@@ -309,11 +294,7 @@ where
                     }
                 }
 
-<<<<<<< HEAD
                 let state = maybe_state.as_ref().expect("provider is set");
-=======
-                let state = maybe_state.as_deref().expect("provider is set");
->>>>>>> v1.5.0
 
                 self.validate_one_against_state(origin, transaction, state)
             }
@@ -379,13 +360,6 @@ where
             }
         };
 
-<<<<<<< HEAD
-        // Reject transactions over defined size to prevent DOS attacks
-        let tx_input_len = transaction.input().len();
-        if tx_input_len > self.max_tx_input_bytes {
-            return Err(TransactionValidationOutcome::Invalid(
-                transaction,
-=======
         // Reject transactions with a nonce equal to U64::max according to EIP-2681
         let tx_nonce = transaction.nonce();
         if tx_nonce == u64::MAX {
@@ -400,7 +374,6 @@ where
         if tx_input_len > self.max_tx_input_bytes {
             return Err(TransactionValidationOutcome::Invalid(
                 transaction,
->>>>>>> v1.5.0
                 InvalidPoolTransactionError::OversizedData(tx_input_len, self.max_tx_input_bytes),
             ))
         }
@@ -572,10 +545,10 @@ where
         //
         // Any other case means that the account is not an EOA, and should not be able to send
         // transactions.
-        if let Some(code_hash) = &account.bytecode_hash {
+        if account.is_empty_code_hash() {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
-                match state.bytecode_by_hash(code_hash) {
-                    Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
+                match state.code_by_hash_ref(account.code_hash) {
+                    Ok(bytecode) => bytecode.is_eip7702(),
                     Err(err) => {
                         return TransactionValidationOutcome::Error(
                             *transaction.hash(),

@@ -4,12 +4,12 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_evm::{
     block::{calc, StateChangePostBlockSource, StateChangeSource, SystemCaller},
-    eth::{dao_fork, eip6110, EthBlockExecutorFactory},
+    eth::{dao_fork, eip6110, spec::EthExecutorSpec, EthBlockExecutorFactory},
     EvmEnv,
 };
 use alloy_primitives::{map::HashMap, Address};
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks};
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -27,7 +27,7 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
 };
 
-pub struct GrevmExecutor<DB, EvmConfig> {
+pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     /// The chainspec
     chain_spec: Arc<ChainSpec>,
     /// How to create an EVM.
@@ -38,7 +38,7 @@ pub struct GrevmExecutor<DB, EvmConfig> {
     system_caller: SystemCaller<Arc<ChainSpec>>,
 }
 
-impl<DB, EvmConfig> GrevmExecutor<DB, EvmConfig>
+impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
 where
     EvmConfig: Clone
         + ConfigureEvm<
@@ -46,6 +46,7 @@ where
             BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
         >,
     DB: ParallelDatabase,
+    ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
 {
     /// Creates a new [`GrevmExecutor`]
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
@@ -178,13 +179,14 @@ where
     }
 }
 
-impl<DB, EvmConfig> ParallelExecutor for GrevmExecutor<DB, EvmConfig>
+impl<DB, EvmConfig, ChainSpec> ParallelExecutor for GrevmExecutor<DB, EvmConfig, ChainSpec>
 where
     EvmConfig: ConfigureEvm<
         Primitives = EthPrimitives,
         BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
     >,
     DB: ParallelDatabase,
+    ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
 {
     type Error = BlockExecutionError;
     type Primitives = EvmConfig::Primitives;
@@ -299,7 +301,12 @@ fn balance_increment_state<DB: ParallelDatabase>(
 
         Ok((
             *address,
-            Account { info, storage: Default::default(), status: AccountStatus::Touched },
+            Account {
+                info,
+                storage: Default::default(),
+                status: AccountStatus::Touched,
+                transaction_id: 0,
+            },
         ))
     };
 

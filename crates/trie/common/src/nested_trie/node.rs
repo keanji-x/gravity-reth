@@ -190,7 +190,7 @@ impl From<Node> for StoredNode {
             Node::ShortNode { key, value, .. } => {
                 buf.push(NodeType::ShortNode as u8);
                 buf.push(key.len() as u8);
-                buf.extend_from_slice(&key);
+                buf.extend(key.pack());
                 match *value {
                     Node::HashNode(rlp) => {
                         // extension node

@@ -2,8 +2,8 @@
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    AccountReader, BlockHashReader, HashedPostStateProvider, StateProofProvider, StateProvider,
-    StateProviderBox, StateRootProvider, StorageRootProvider,
+    AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, StateProofProvider,
+    StateProvider, StateProviderBox, StateRootProvider, StorageRootProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
@@ -119,7 +119,9 @@ impl ParallelStateProvider {
 
 impl StateProvider for ParallelStateProvider {
     provider_fn! {storage(address: Address, key: StorageKey) -> Option<StorageValue>}
+}
 
+impl BytecodeReader for ParallelStateProvider {
     provider_fn! {bytecode_by_hash(code_hash: &B256) -> Option<Bytecode>}
 }
 

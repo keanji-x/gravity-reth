@@ -1,8 +1,11 @@
 use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles};
-use alloc::vec::Vec;
+use alloc::{
+    collections::{btree_map::BTreeMap, btree_set::BTreeSet},
+    vec::Vec,
+};
 use alloy_primitives::{
     map::{B256Map, B256Set, HashMap, HashSet},
-    B256,
+    FixedBytes, B256,
 };
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]

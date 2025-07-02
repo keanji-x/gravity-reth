@@ -52,12 +52,6 @@ pub trait StateProvider:
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
 
-<<<<<<< HEAD
-    /// Get account code by its hash
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
-
-=======
->>>>>>> v1.5.0
     /// Get account code by its address.
     ///
     /// Returns `None` if the account doesn't exist or account is not a contract
@@ -265,5 +259,14 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Represents the state at the block that extends the canonical chain.
     ///
     /// If the block couldn't be found, returns `None`.
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>>;
+    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        self.pending_state_by_hash_with_opts(block_hash, StateProviderOptions::default())
+    }
+
+    /// See `pending_state_by_hash`
+    fn pending_state_by_hash_with_opts(
+        &self,
+        block_hash: B256,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>>;
 }

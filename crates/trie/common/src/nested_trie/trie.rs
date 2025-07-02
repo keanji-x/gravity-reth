@@ -102,7 +102,7 @@ where
                         let convert =
                             Box::new(Node::HashNode(next_node.cached_rlp().unwrap().clone()));
                         let mut next_path = prefix.clone();
-                        next_path.extend_from_slice_unchecked(&key);
+                        next_path.extend(&key);
                         self.take_output_inner(next_node, next_path);
                         self.trie_output
                             .update_nodes
@@ -144,10 +144,10 @@ where
         if let Some(node) = node {
             match node {
                 Node::FullNode { mut children, mut flags } => {
-                    let index = key[0] as usize;
+                    let index = key.get(0).unwrap() as usize;
                     let child = children[index].take().map(|n| *n);
                     let mut new_prefix = prefix.clone();
-                    new_prefix.push_unchecked(key[0]);
+                    new_prefix.push_unchecked(key.get(0).unwrap());
                     let (dirty, new_node) =
                         self.insert_inner(child, new_prefix, key.slice(1..), value)?;
                     children[index] = Some(Box::new(new_node));
@@ -163,7 +163,7 @@ where
                     if matchlen == node_key.len() {
                         let next_node = Some(*node_value);
                         let mut new_prefix = prefix.clone();
-                        new_prefix.extend_from_slice_unchecked(&key[..matchlen]);
+                        new_prefix.extend(&key.slice(..matchlen));
                         let (dirty, new_node) =
                             self.insert_inner(next_node, new_prefix, key.slice(matchlen..), value)?;
                         if dirty {
@@ -178,21 +178,22 @@ where
                     let mut children: [Option<Box<Node>>; 17] = Default::default();
                     let matchlen_inc = matchlen + 1;
                     let mut new_prefix = prefix.clone();
-                    new_prefix.extend_from_slice_unchecked(&node_key[..matchlen_inc]);
+                    new_prefix.extend(&node_key.slice(..matchlen_inc));
                     let (_, extension_node) = self.insert_inner(
                         None,
                         new_prefix,
                         node_key.slice(matchlen_inc..),
                         *node_value,
                     )?;
-                    children[node_key[matchlen] as usize] = Some(Box::new(extension_node));
+                    children[node_key.get(matchlen).unwrap() as usize] =
+                        Some(Box::new(extension_node));
 
                     let mut new_prefix = prefix.clone();
                     // if matchlen == key.len(), value is the value of the branch node.
-                    new_prefix.extend_from_slice_unchecked(&key[..matchlen_inc]);
+                    new_prefix.extend(&key.slice(..matchlen_inc));
                     let (_, new_node) =
                         self.insert_inner(None, new_prefix, key.slice(matchlen_inc..), value)?;
-                    children[key[matchlen] as usize] = Some(Box::new(new_node));
+                    children[key.get(matchlen).unwrap() as usize] = Some(Box::new(new_node));
 
                     let branch = Node::FullNode { children, flags: NodeFlag::dirty_node() };
                     if matchlen == 0 {
@@ -339,7 +340,7 @@ where
                         single_child
                     {
                         let mut new_key = nibble_path.clone();
-                        new_key.extend_from_slice_unchecked(&cn_key);
+                        new_key.extend(&cn_key);
                         removed_nodes.insert(nibble_path.clone());
                         compatible_removed_nodes.insert(nibble_path.clone());
                         Node::ShortNode {
@@ -408,10 +409,10 @@ where
         if let Some(node) = node {
             match node {
                 Node::FullNode { mut children, flags } => {
-                    let index = key[0] as usize;
+                    let index = key.get(0).unwrap() as usize;
                     let child = children[index].take().map(|n| *n);
                     let mut new_prefix = prefix.clone();
-                    new_prefix.push_unchecked(key[0]);
+                    new_prefix.push_unchecked(key.get(0).unwrap());
                     let (dirty, new_node) = self.delete_inner(child, new_prefix, key.slice(1..))?;
                     children[index] = new_node.map(|n| Box::new(n));
                     if !dirty {
@@ -472,7 +473,7 @@ where
                             // Mark the original short node as deleted since the
                             // value is embedded into the parent now.
                             let mut new_key = Nibbles::from_nibbles_unchecked([pos as u8]);
-                            new_key.extend_from_slice_unchecked(&cn_key);
+                            new_key.extend(&cn_key);
                             // current node is fall back into short node, and will concat the next
                             // short node, so the next short node is
                             // removed.
@@ -522,7 +523,7 @@ where
                     }
                     let next_node = Some(*node_value);
                     let mut new_prefix = prefix.clone();
-                    new_prefix.extend_from_slice_unchecked(&key[..matchlen]);
+                    new_prefix.extend(&key.slice(..matchlen));
                     let (dirty, new_node) =
                         self.delete_inner(next_node, new_prefix, key.slice(matchlen..))?;
                     let new_node = new_node.unwrap();
@@ -539,11 +540,11 @@ where
                     match new_node {
                         Node::ShortNode { key: child_key, value: child_value, .. } => {
                             let mut extend_key = node_key.clone();
-                            extend_key.extend_from_slice_unchecked(&child_key);
+                            extend_key.extend(&child_key);
                             // the next short node is concat by current short node,
                             // so the next short node is removed.
                             let mut delete_next_path = prefix.clone();
-                            delete_next_path.extend_from_slice_unchecked(&node_key);
+                            delete_next_path.extend(&node_key);
                             self.trie_output.removed_nodes.insert(delete_next_path);
                             Ok((
                                 true,

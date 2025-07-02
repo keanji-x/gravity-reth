@@ -2493,6 +2493,7 @@ where
                 hashed_state: Arc::new(hashed_state),
             },
             trie: trie_updates,
+            triev2: Default::default(),
         };
 
         // if the parent is the canonical head, we can insert the block as the pending block

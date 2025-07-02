@@ -86,34 +86,10 @@ use crate::{
     validate::{TransactionValidationOutcome, ValidPoolTransaction, ValidTransaction},
     CanonicalStateUpdate, EthPoolTransaction, PoolConfig, TransactionOrdering,
     TransactionValidator,
-<<<<<<< HEAD
-};
-
-use alloy_eips::{
-    eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant, Typed2718,
-=======
->>>>>>> v1.5.0
 };
 
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
-<<<<<<< HEAD
-use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use reth_eth_wire_types::HandleMempoolData;
-use reth_execution_types::ChangedAccount;
-use reth_primitives_traits::Recovered;
-use rustc_hash::FxHashMap;
-use std::{
-    collections::HashSet,
-    fmt,
-    sync::{atomic::AtomicU64, Arc},
-    time::{Duration, Instant},
-    usize,
-};
-use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, trace, warn};
-=======
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
@@ -124,7 +100,6 @@ use rustc_hash::FxHashMap;
 use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
->>>>>>> v1.5.0
 mod events;
 pub use best::{BestTransactionFilter, BestTransactionsWithPrioritizedSenders};
 pub use blob::{blob_tx_priority, fee_delta, BlobOrd, BlobTransactions};

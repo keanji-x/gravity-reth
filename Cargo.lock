@@ -10482,6 +10482,7 @@ dependencies = [
  "reth-storage-errors",
  "reth-trie-common",
  "reth-trie-db",
+ "revm-bytecode",
  "revm-database",
 ]
 
