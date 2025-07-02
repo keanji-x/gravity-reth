@@ -37,6 +37,7 @@ pub type StateProviderBox = Box<dyn StateProvider>;
 pub trait StateProvider:
     BlockHashReader
     + AccountReader
+    + BytecodeReader
     + StateRootProvider
     + StorageRootProvider
     + StateProofProvider
@@ -51,9 +52,12 @@ pub trait StateProvider:
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
 
+<<<<<<< HEAD
     /// Get account code by its hash
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
 
+=======
+>>>>>>> v1.5.0
     /// Get account code by its address.
     ///
     /// Returns `None` if the account doesn't exist or account is not a contract
@@ -97,6 +101,10 @@ pub trait StateProvider:
     }
 }
 
+/// Minimal requirements to read a full account, for example, to validate its new transactions
+pub trait AccountInfoReader: AccountReader + BytecodeReader {}
+impl<T: AccountReader + BytecodeReader> AccountInfoReader for T {}
+
 /// Trait implemented for database providers that can provide the [`reth_trie_db::StateCommitment`]
 /// type.
 #[cfg(feature = "db-api")]
@@ -111,6 +119,13 @@ pub trait StateCommitmentProvider: Send + Sync {
 pub trait HashedPostStateProvider: Send + Sync {
     /// Returns the `HashedPostState` of the provided [`BundleState`].
     fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState;
+}
+
+/// Trait for reading bytecode associated with a given code hash.
+#[auto_impl(&, Arc, Box)]
+pub trait BytecodeReader: Send + Sync {
+    /// Get account code by its hash
+    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
 }
 
 /// Trait implemented for database providers that can be converted into a historical state provider.
@@ -250,14 +265,5 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Represents the state at the block that extends the canonical chain.
     ///
     /// If the block couldn't be found, returns `None`.
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
-        self.pending_state_by_hash_with_opts(block_hash, StateProviderOptions::default())
-    }
-
-    /// See `pending_state_by_hash`
-    fn pending_state_by_hash_with_opts(
-        &self,
-        block_hash: B256,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<Option<StateProviderBox>>;
+    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>>;
 }

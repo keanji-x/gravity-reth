@@ -215,7 +215,12 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
 
         trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
-        self.history_by_block_number(block_number, opts)
+
+        if opts.parallel.get() > 1 {
+            Ok(Box::new(ParallelStateProvider::try_new(|| Ok(self.provider()?.try_into_history_at_block(block_number)?), opts.parallel.get())?))
+        } else {
+            provider.try_into_history_at_block(block_number)
+        }
     }
 }
 
@@ -367,6 +372,17 @@ impl<N: ProviderNodeTypes> BlockNumReader for ProviderFactory<N> {
         self.provider()?.last_block_number()
     }
 
+    fn earliest_block_number(&self) -> ProviderResult<BlockNumber> {
+        // expired height tracks the lowest block number that has been expired, therefore the
+        // earliest block number is one more than that.
+        let mut earliest = self.static_file_provider.expired_history_height();
+        if earliest > 0 {
+            // If the expired history height is 0, then the earliest block number is still 0.
+            earliest += 1;
+        }
+        Ok(earliest)
+    }
+
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
         self.provider()?.block_number(hash)
     }
@@ -387,12 +403,8 @@ impl<N: ProviderNodeTypes> BlockReader for ProviderFactory<N> {
         self.provider()?.block(id)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<SealedBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
         self.provider()?.pending_block()
-    }
-
-    fn pending_block_with_senders(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
-        self.provider()?.pending_block_with_senders()
     }
 
     fn pending_block_and_receipts(

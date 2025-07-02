@@ -95,6 +95,7 @@ serde = [
     "reth-primitives-traits/serde",
     "reth-ethereum-primitives/serde",
     "reth-chain-state/serde",
+    "reth-storage-api/serde",
 ]
 test-utils = [
     "rand",

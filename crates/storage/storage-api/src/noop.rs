@@ -163,11 +163,7 @@ impl<C: Send + Sync, N: NodePrimitives> BlockReader for NoopProvider<C, N> {
         Ok(None)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<SealedBlock<Self::Block>>> {
-        Ok(None)
-    }
-
-    fn pending_block_with_senders(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
         Ok(None)
     }
 
@@ -459,14 +455,24 @@ impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
     ) -> ProviderResult<Option<StorageValue>> {
         Ok(None)
     }
+<<<<<<< HEAD
 
+=======
+}
+
+impl<C: Send + Sync, N: NodePrimitives> BytecodeReader for NoopProvider<C, N> {
+>>>>>>> v1.5.0
     fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         Ok(None)
     }
 }
 
 impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopProvider<C, N> {
+<<<<<<< HEAD
     fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
+=======
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
+>>>>>>> v1.5.0
         Ok(Box::new(self.clone()))
     }
 
@@ -490,7 +496,9 @@ impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopP
 
                 self.history_by_block_hash(hash)
             }
-            BlockNumberOrTag::Earliest => self.history_by_block_number(0),
+            BlockNumberOrTag::Earliest => {
+                self.history_by_block_number(self.earliest_block_number()?)
+            }
             BlockNumberOrTag::Pending => self.pending(),
             BlockNumberOrTag::Number(num) => self.history_by_block_number(num),
         }

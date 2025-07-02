@@ -767,7 +767,75 @@ impl StorageProof {
     pub fn verify(&self, root: B256) -> Result<(), ProofVerificationError> {
         let expected =
             if self.value.is_zero() { None } else { Some(encode_fixed_size(&self.value).to_vec()) };
-        verify_proof(root, self.nibbles.clone(), expected, &self.proof)
+        verify_proof(root, self.nibbles, expected, &self.proof)
+    }
+}
+
+#[cfg(feature = "eip1186")]
+impl StorageProof {
+    /// Convert into an EIP-1186 storage proof
+    pub fn into_eip1186_proof(
+        self,
+        slot: alloy_serde::JsonStorageKey,
+    ) -> alloy_rpc_types_eth::EIP1186StorageProof {
+        alloy_rpc_types_eth::EIP1186StorageProof { key: slot, value: self.value, proof: self.proof }
+    }
+
+    /// Convert from an
+    /// [`EIP1186StorageProof`](alloy_rpc_types_eth::EIP1186StorageProof)
+    ///
+    /// This is the inverse of [`Self::into_eip1186_proof`].
+    pub fn from_eip1186_proof(storage_proof: alloy_rpc_types_eth::EIP1186StorageProof) -> Self {
+        Self {
+            value: storage_proof.value,
+            proof: storage_proof.proof,
+            ..Self::new(storage_proof.key.as_b256())
+        }
+    }
+}
+
+#[cfg(feature = "eip1186")]
+impl From<alloy_rpc_types_eth::EIP1186StorageProof> for StorageProof {
+    fn from(proof: alloy_rpc_types_eth::EIP1186StorageProof) -> Self {
+        Self::from_eip1186_proof(proof)
+    }
+}
+
+/// The merkle proof of the storage entry, using decoded proofs.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct DecodedStorageProof {
+    /// The raw storage key.
+    pub key: B256,
+    /// The hashed storage key nibbles.
+    pub nibbles: Nibbles,
+    /// The storage value.
+    pub value: U256,
+    /// Array of merkle trie nodes which starting from the storage root node and following the path
+    /// of the hashed storage slot as key.
+    pub proof: Vec<TrieNode>,
+}
+
+impl DecodedStorageProof {
+    /// Create new storage proof from the storage slot.
+    pub fn new(key: B256) -> Self {
+        let nibbles = Nibbles::unpack(keccak256(key));
+        Self { key, nibbles, ..Default::default() }
+    }
+
+    /// Create new storage proof from the storage slot and its pre-hashed image.
+    pub fn new_with_hashed(key: B256, hashed_key: B256) -> Self {
+        Self { key, nibbles: Nibbles::unpack(hashed_key), ..Default::default() }
+    }
+
+    /// Create new storage proof from the storage slot and its pre-hashed image.
+    pub fn new_with_nibbles(key: B256, nibbles: Nibbles) -> Self {
+        Self { key, nibbles, ..Default::default() }
+    }
+
+    /// Set proof nodes on storage proof.
+    pub fn with_proof(mut self, proof: Vec<TrieNode>) -> Self {
+        self.proof = proof;
+        self
     }
 }
 

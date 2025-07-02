@@ -86,13 +86,18 @@ use crate::{
     validate::{TransactionValidationOutcome, ValidPoolTransaction, ValidTransaction},
     CanonicalStateUpdate, EthPoolTransaction, PoolConfig, TransactionOrdering,
     TransactionValidator,
+<<<<<<< HEAD
 };
 
 use alloy_eips::{
     eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant, Typed2718,
+=======
+>>>>>>> v1.5.0
 };
+
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
+<<<<<<< HEAD
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
@@ -108,6 +113,18 @@ use std::{
 };
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, trace, warn};
+=======
+use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use reth_eth_wire_types::HandleMempoolData;
+use reth_execution_types::ChangedAccount;
+
+use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
+use reth_primitives_traits::Recovered;
+use rustc_hash::FxHashMap;
+use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
+use tokio::sync::mpsc;
+use tracing::{debug, trace, warn};
+>>>>>>> v1.5.0
 mod events;
 pub use best::{BestTransactionFilter, BestTransactionsWithPrioritizedSenders};
 pub use blob::{blob_tx_priority, fee_delta, BlobOrd, BlobTransactions};
@@ -1082,7 +1099,7 @@ where
             .collect()
     }
 
-    /// Returns all pending transactions filted by [`TransactionOrigin`]
+    /// Returns all pending transactions filtered by [`TransactionOrigin`]
     pub fn get_pending_transactions_by_origin(
         &self,
         origin: TransactionOrigin,
@@ -1393,11 +1410,13 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 mod tests {
     use crate::{
         blobstore::{BlobStore, InMemoryBlobStore},
+        identifier::SenderId,
         test_utils::{MockTransaction, TestPoolBuilder},
         validate::ValidTransaction,
         BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
     };
     use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
+    use alloy_primitives::Address;
     use std::{fs, path::PathBuf, time::Instant};
 
     #[test]
@@ -1531,5 +1550,29 @@ mod tests {
 
         // Assert that the pool's blob store matches the expected blob store.
         assert_eq!(*test_pool.blob_store(), blob_store);
+    }
+
+    #[test]
+    fn test_auths_stored_in_identifiers() {
+        // Create a test pool with default configuration.
+        let test_pool = &TestPoolBuilder::default().with_config(Default::default()).pool;
+
+        let auth = Address::new([1; 20]);
+        let tx = MockTransaction::eip7702();
+
+        test_pool.add_transactions(
+            TransactionOrigin::Local,
+            [TransactionValidationOutcome::Valid {
+                balance: U256::from(1_000),
+                state_nonce: 0,
+                bytecode_hash: None,
+                transaction: ValidTransaction::Valid(tx),
+                propagate: true,
+                authorities: Some(vec![auth]),
+            }],
+        );
+
+        let identifiers = test_pool.identifiers.read();
+        assert_eq!(identifiers.sender_id(&auth), Some(SenderId::from(1)));
     }
 }

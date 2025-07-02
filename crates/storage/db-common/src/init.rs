@@ -96,10 +96,8 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
-        + TrieWriterV2
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
-    PF::Provider: Send + Sync + 'static,
 {
     let chain = factory.chain_spec();
 
