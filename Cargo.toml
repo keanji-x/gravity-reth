@@ -463,7 +463,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", branch = "reth-v1.4.8" }
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", branch = "reth-v1.5.0" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
@@ -501,24 +501,24 @@ reth-ress-protocol = { path = "crates/ress/protocol" }
 reth-ress-provider = { path = "crates/ress/provider" }
 
 # revm
-revm = { version = "26.0.1", default-features = false }
-revm-bytecode = { version = "5.0.0", default-features = false }
-revm-database = { version = "6.0.0", default-features = false }
-revm-state = { version = "6.0.0", default-features = false }
-revm-primitives = { version = "20.0.0", default-features = false }
-revm-interpreter = { version = "22.0.1", default-features = false }
-revm-inspector = { version = "7.0.1", default-features = false }
-revm-context = { version = "7.0.1", default-features = false }
-revm-context-interface = { version = "7.0.0", default-features = false }
-revm-database-interface = { version = "6.0.0", default-features = false }
-op-revm = { version = "7.0.1", default-features = false }
-revm-inspectors = "0.25.0"
+revm = { package = "revm", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-bytecode = { package = "revm-bytecode", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-database = { package = "revm-database", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-state = { package = "revm-state", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-primitives = { package = "revm-primitives", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-interpreter = { package = "revm-interpreter", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-inspector = { package = "revm-inspector", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-context = { package = "revm-context", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-context-interface = { package = "revm-context-interface", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-database-interface = { package = "revm-database-interface", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+op-revm = { package = "op-revm", git = "https://github.com/Galxe/revm", branch = "v26.0.1-gravity", default-features = false }
+revm-inspectors = { git = "https://github.com/Galxe/revm-inspectors", branch = "v0.25.0-gravity" }
 
 # eth
 alloy-chains = { version = "0.2.0", default-features = false }
 alloy-dyn-abi = "1.2.0"
 alloy-eip2124 = { version = "0.2.0", default-features = false }
-alloy-evm = { version = "0.12", default-features = false }
+alloy-evm = { package = "alloy-evm", git = "https://github.com/Galxe/alloy-evm", branch = "v0.12.0-gravity", default-features = false }
 alloy-primitives = { version = "1.2.0", default-features = false, features = ["map-foldhash"] }
 alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
 alloy-sol-macro = "1.2.0"
@@ -556,7 +556,7 @@ alloy-transport-ipc = { version = "1.0.13", default-features = false }
 alloy-transport-ws = { version = "1.0.13", default-features = false }
 
 # op
-alloy-op-evm = { version = "0.12", default-features = false }
+alloy-op-evm = { package = "alloy-op-evm", git = "https://github.com/Galxe/alloy-evm", branch = "v0.12.0-gravity", default-features = false }
 alloy-op-hardforks = "0.2.2"
 op-alloy-rpc-types = { version = "0.18.7", default-features = false }
 op-alloy-rpc-types-engine = { version = "0.18.7", default-features = false }
