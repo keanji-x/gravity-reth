@@ -104,7 +104,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 mod events;
 pub use best::{BestTransactionFilter, BestTransactionsWithPrioritizedSenders};
 pub use blob::{blob_tx_priority, fee_delta, BlobOrd, BlobTransactions};
@@ -527,7 +527,6 @@ where
                     origin,
                     authority_ids: authorities.map(|auths| self.get_sender_ids(auths)),
                 };
-                let tx = Arc::new(tx);
                 let added = pool.add_transaction(tx, balance, state_nonce, bytecode_hash)?;
                 let hash = *added.hash();
                 // transaction was successfully inserted into the pool
@@ -589,7 +588,7 @@ where
 
     /// Task responsible for receiving transactions and processing them in batches.
     pub async fn batch_add_transactions_task(self: Arc<Self>) {
-        info!("Batch insert task started with batch time {}", get_batch_insert_time());
+        tracing::info!("Batch insert task started with batch time {}", get_batch_insert_time());
         let sleep_duration = Duration::from_millis(get_batch_insert_time());
         let mut duration = Duration::from_millis(0);
         loop {
