@@ -71,19 +71,19 @@ fn test_remove_canonical_until_missing_trie_blocks_not_in_persisted_trie_updates
         "B5 (Present trie) must be in persisted_trie_updates"
     );
 
-    // BUG CONFIRMED: B1 and B2 had Missing trie updates, so `remove_canonical_until`
-    // skips them (state.rs:223-226 `continue`) and they are absent from
-    // `persisted_trie_updates`.  Any reorg recovery filter_map that looks them up
-    // will silently drop them, creating a gap in the reinserted old chain.
+    // FIX VERIFIED: B1 and B2 had Missing trie updates, but after the fix
+    // `remove_canonical_until` inserts a sentinel empty Arc<TrieUpdates> into
+    // `persisted_trie_updates` for them.  This ensures the reorg recovery filter_map
+    // can reconstruct the full old chain without gaps.
     assert!(
-        !tree_state.persisted_trie_updates.contains_key(&b1.recovered_block().hash()),
-        "BUG #199: B1 (Missing trie) is absent from persisted_trie_updates after removal \
-         — the reorg recovery filter_map will silently drop it"
+        tree_state.persisted_trie_updates.contains_key(&b1.recovered_block().hash()),
+        "B1 (Missing trie) must be tracked in persisted_trie_updates as a sentinel \
+         so reorg recovery can reconstruct the full old chain"
     );
     assert!(
-        !tree_state.persisted_trie_updates.contains_key(&b2.recovered_block().hash()),
-        "BUG #199: B2 (Missing trie) is absent from persisted_trie_updates after removal \
-         — the reorg recovery filter_map will silently drop it"
+        tree_state.persisted_trie_updates.contains_key(&b2.recovered_block().hash()),
+        "B2 (Missing trie) must be tracked in persisted_trie_updates as a sentinel \
+         so reorg recovery can reconstruct the full old chain"
     );
 }
 

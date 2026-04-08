@@ -2313,9 +2313,16 @@ where
                         .get(&block.recovered_block.hash())?
                         .1
                         .clone();
+                    // An empty sentinel trie means the block was originally persisted
+                    // with ExecutedTrieUpdates::Missing; preserve that semantics.
+                    let executed_trie = if trie.is_empty() {
+                        ExecutedTrieUpdates::Missing
+                    } else {
+                        ExecutedTrieUpdates::Present(trie)
+                    };
                     Some(ExecutedBlockWithTrieUpdates {
                         block: block.clone(),
-                        trie: ExecutedTrieUpdates::Present(trie),
+                        trie: executed_trie,
                         triev2: Default::default(),
                     })
                 })
