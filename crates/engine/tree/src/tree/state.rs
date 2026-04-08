@@ -648,4 +648,116 @@ mod tests {
             Some(&HashSet::from_iter([blocks[4].recovered_block().hash()]))
         );
     }
+
+    // Tests for issue #198: dangling `current_canonical_head` after persistence catches up.
+
+    /// After `remove_canonical_until` removes all blocks up to and including the canonical head,
+    /// `current_canonical_head` must not be a dangling pointer into an empty `blocks_by_hash`.
+    #[test]
+    fn test_remove_canonical_until_head_not_dangling_after_catchup() {
+        // Build B1 → B2 → B3 → B4 → B5.
+        let mut test_block_builder = TestBlockBuilder::eth();
+        let blocks: Vec<_> = test_block_builder.get_executed_blocks(1..6).collect();
+
+        let head = blocks.last().unwrap();
+        let head_num_hash = head.recovered_block().num_hash();
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+        }
+        tree_state.set_canonical_head(head_num_hash);
+
+        // Simulate persistence catching up to the canonical head.
+        tree_state.remove_canonical_until(head_num_hash.number, head_num_hash.hash);
+
+        // The head block must have been removed from blocks_by_hash.
+        assert!(
+            !tree_state.blocks_by_hash.contains_key(&head_num_hash.hash),
+            "head block should be removed from blocks_by_hash after remove_canonical_until"
+        );
+
+        // `current_canonical_head` must NOT still point at the evicted hash; it should have
+        // been updated so it is no longer dangling.
+        let stale_head = tree_state.current_canonical_head.hash == head_num_hash.hash
+            && !tree_state.blocks_by_hash.contains_key(&head_num_hash.hash);
+        assert!(
+            !stale_head,
+            "current_canonical_head is dangling: points to a hash that no longer exists in blocks_by_hash"
+        );
+    }
+
+    /// After persistence catches up to the head, a subsequent `remove_canonical_until` for a
+    /// newly inserted child block must NOT be silently skipped.
+    ///
+    /// This is the core liveness regression from issue #198: because `is_canonical` walks from
+    /// the stale head hash and immediately fails the `blocks_by_hash.get` lookup, the second
+    /// call returns early without pruning anything.
+    #[test]
+    fn test_remove_canonical_until_second_call_not_skipped_after_catchup() {
+        let mut test_block_builder = TestBlockBuilder::eth();
+        // B1 … B5 form the initial canonical chain.
+        let blocks: Vec<_> = test_block_builder.get_executed_blocks(1..6).collect();
+
+        let head = blocks.last().unwrap();
+        let head_num_hash = head.recovered_block().num_hash();
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+        }
+        tree_state.set_canonical_head(head_num_hash);
+
+        // First persistence: catches up to the canonical head (removes B1–B5).
+        tree_state.remove_canonical_until(head_num_hash.number, head_num_hash.hash);
+
+        // A new child block B6 arrives and becomes the new canonical head.
+        let block6 = test_block_builder
+            .get_executed_block_with_number(6, head_num_hash.hash);
+        let b6_num_hash = block6.recovered_block().num_hash();
+        tree_state.insert_executed(block6);
+        tree_state.set_canonical_head(b6_num_hash);
+
+        // Second persistence: B6 is now persisted.
+        tree_state.remove_canonical_until(b6_num_hash.number, b6_num_hash.hash);
+
+        // B6 must have been pruned — the second call must not have been silently rejected.
+        assert!(
+            !tree_state.blocks_by_hash.contains_key(&b6_num_hash.hash),
+            "second remove_canonical_until was silently skipped: B6 still present in blocks_by_hash (dangling head bug)"
+        );
+    }
+
+    /// `is_canonical` must return `true` for a newly inserted child block even when the previous
+    /// canonical head has been evicted from `blocks_by_hash`.
+    #[test]
+    fn test_is_canonical_after_head_eviction() {
+        let mut test_block_builder = TestBlockBuilder::eth();
+        let blocks: Vec<_> = test_block_builder.get_executed_blocks(1..4).collect();
+
+        let head = blocks.last().unwrap();
+        let head_num_hash = head.recovered_block().num_hash();
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+        }
+        tree_state.set_canonical_head(head_num_hash);
+
+        // Remove all canonical blocks including the head.
+        tree_state.remove_canonical_until(head_num_hash.number, head_num_hash.hash);
+
+        // Insert B4 and update the canonical head to it.
+        let block4 =
+            test_block_builder.get_executed_block_with_number(4, head_num_hash.hash);
+        let b4_num_hash = block4.recovered_block().num_hash();
+        tree_state.insert_executed(block4);
+        tree_state.set_canonical_head(b4_num_hash);
+
+        // B4 should be canonical.
+        assert!(
+            tree_state.is_canonical(b4_num_hash.hash),
+            "is_canonical should return true for the new canonical head after old head was evicted"
+        );
+    }
 }
