@@ -28,7 +28,7 @@ use std::{
     time::Instant,
 };
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info};
 
 /// Writes parts of reth's in memory tree state to the database and static files.
@@ -413,11 +413,15 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     }
 
     /// Create a new [`PersistenceHandle`], and spawn the persistence service.
+    ///
+    /// Returns a tuple of the handle and a liveness receiver. The liveness receiver holds `true`
+    /// while the service is running and transitions to `false` when the service exits for any
+    /// reason. Callers should treat a `false` value as a fatal condition.
     pub fn spawn_service<N>(
         provider_factory: ProviderFactory<N>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
-    ) -> PersistenceHandle<N::Primitives>
+    ) -> (PersistenceHandle<N::Primitives>, watch::Receiver<bool>)
     where
         N: ProviderNodeTypes,
     {
@@ -427,19 +431,25 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         // construct persistence handle
         let persistence_handle = PersistenceHandle::new(db_service_tx);
 
+        // liveness channel: true = alive, false = dead
+        let (liveness_tx, liveness_rx) = watch::channel(true);
+
         // spawn the persistence service
         let db_service =
             PersistenceService::new(provider_factory, db_service_rx, pruner, sync_metrics_tx);
         std::thread::Builder::new()
             .name("Persistence Service".to_string())
-            .spawn(|| {
+            .spawn(move || {
                 if let Err(err) = db_service.run() {
                     error!(target: "engine::persistence", ?err, "Persistence service failed");
                 }
+                // Signal that the service has exited (either cleanly or due to error).
+                // Receivers observing `false` should treat this as a fatal condition.
+                let _ = liveness_tx.send(false);
             })
             .unwrap();
 
-        persistence_handle
+        (persistence_handle, liveness_rx)
     }
 
     /// Sends a specific [`PersistenceAction`] in the contained channel. The caller is responsible
@@ -517,7 +527,7 @@ mod tests {
             Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
 
         let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx).0
     }
 
     #[tokio::test]

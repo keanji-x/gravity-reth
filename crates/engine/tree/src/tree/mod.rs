@@ -57,6 +57,7 @@ use std::{
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     oneshot::{self, error::TryRecvError},
+    watch,
 };
 use tracing::*;
 
@@ -309,6 +310,9 @@ where
     outgoing: UnboundedSender<EngineApiEvent<N>>,
     /// Channels to the persistence layer.
     persistence: PersistenceHandle<N>,
+    /// Liveness signal for the persistence service. Holds `true` while the service is running;
+    /// transitions to `false` when the service exits. `None` means no liveness check (tests).
+    persistence_liveness: Option<watch::Receiver<bool>>,
     /// Tracks the state changes of the persistence task.
     persistence_state: PersistenceState,
     /// Flag indicating the state of the node's backfill synchronization process.
@@ -398,6 +402,7 @@ where
             incoming,
             outgoing,
             persistence,
+            persistence_liveness: None,
             persistence_state,
             backfill_sync_state: BackfillSyncState::Idle,
             state,
@@ -412,6 +417,15 @@ where
         }
     }
 
+    /// Attach a liveness receiver for the persistence service.
+    ///
+    /// When the receiver transitions to `false`, the engine treats it as a fatal condition and
+    /// stops processing. Call this after [`Self::new`] when a real persistence service is used.
+    pub fn with_persistence_liveness(mut self, liveness: watch::Receiver<bool>) -> Self {
+        self.persistence_liveness = Some(liveness);
+        self
+    }
+
     /// Creates a new [`EngineApiTreeHandler`] instance and spawns it in its
     /// own thread.
     ///
@@ -423,6 +437,7 @@ where
         consensus: Arc<dyn FullConsensus<N, Error = ConsensusError>>,
         payload_validator: V,
         persistence: PersistenceHandle<N>,
+        persistence_liveness: watch::Receiver<bool>,
         payload_builder: PayloadBuilderHandle<T>,
         canonical_in_memory_state: CanonicalInMemoryState<N>,
         config: TreeConfig,
@@ -459,7 +474,8 @@ where
             config,
             kind,
             evm_config,
-        );
+        )
+        .with_persistence_liveness(persistence_liveness);
         let incoming = task.incoming_tx.clone();
         std::thread::Builder::new().name("Engine Task".to_string()).spawn(|| task.run()).unwrap();
         (incoming, outgoing)
@@ -1352,24 +1368,41 @@ where
         }
     }
 
+    /// Returns an error if the persistence service has exited.
+    fn check_persistence_alive(&self) -> Result<(), AdvancePersistenceError> {
+        if let Some(liveness) = &self.persistence_liveness {
+            if !*liveness.borrow() {
+                return Err(AdvancePersistenceError::PersistenceServiceDied);
+            }
+        }
+        Ok(())
+    }
+
     /// Helper method to remove blocks and set the persistence state. This ensures we keep track of
     /// the current persistence action while we're removing blocks.
-    fn remove_blocks(&mut self, new_tip_num: u64) {
+    fn remove_blocks(&mut self, new_tip_num: u64) -> Result<(), AdvancePersistenceError> {
         debug!(target: "engine::tree", ?new_tip_num, last_persisted_block_number=?self.persistence_state.last_persisted_block.number, "Removing blocks using persistence task");
         if new_tip_num < self.persistence_state.last_persisted_block.number {
             debug!(target: "engine::tree", ?new_tip_num, "Starting remove blocks job");
+            self.check_persistence_alive()?;
             let (tx, rx) = oneshot::channel();
-            let _ = self.persistence.remove_blocks_above(new_tip_num, tx);
+            self.persistence
+                .remove_blocks_above(new_tip_num, tx)
+                .map_err(|_| AdvancePersistenceError::PersistenceServiceDied)?;
             self.persistence_state.start_remove(new_tip_num, rx);
         }
+        Ok(())
     }
 
     /// Helper method to save blocks and set the persistence state. This ensures we keep track of
     /// the current persistence action while we're saving blocks.
-    fn persist_blocks(&mut self, blocks_to_persist: Vec<ExecutedBlockWithTrieUpdates<N>>) {
+    fn persist_blocks(
+        &mut self,
+        blocks_to_persist: Vec<ExecutedBlockWithTrieUpdates<N>>,
+    ) -> Result<(), AdvancePersistenceError> {
         if blocks_to_persist.is_empty() {
             debug!(target: "engine::tree", "Returned empty set of blocks to persist");
-            return
+            return Ok(())
         }
 
         // NOTE: checked non-empty above
@@ -1379,11 +1412,15 @@ where
             .map(|b| b.recovered_block().num_hash())
             .expect("Checked non-empty persisting blocks");
 
+        self.check_persistence_alive()?;
         info!(target: "engine::tree", blocks = ?blocks_to_persist.iter().map(|block| block.recovered_block().num_hash()).collect::<Vec<_>>(), "Persisting blocks");
         let (tx, rx) = oneshot::channel();
-        let _ = self.persistence.save_blocks(blocks_to_persist, tx);
+        self.persistence
+            .save_blocks(blocks_to_persist, tx)
+            .map_err(|_| AdvancePersistenceError::PersistenceServiceDied)?;
 
         self.persistence_state.start_save(highest_num_hash, rx);
+        Ok(())
     }
 
     /// Attempts to advance the persistence state.
@@ -1427,12 +1464,12 @@ where
 
         if !self.persistence_state.in_progress() {
             if let Some(new_tip_num) = self.find_disk_reorg()? {
-                self.remove_blocks(new_tip_num)
+                self.remove_blocks(new_tip_num)?;
             }
 
             if self.should_persist() {
                 let blocks_to_persist = self.get_canonical_blocks_to_persist()?;
-                self.persist_blocks(blocks_to_persist);
+                self.persist_blocks(blocks_to_persist)?;
             }
         }
 
@@ -1877,11 +1914,11 @@ where
     /// height.
     ///
     /// Assumes that `finish` has been called on the `persistence_state` at least once
-    fn on_new_persisted_block(&mut self) -> ProviderResult<()> {
+    fn on_new_persisted_block(&mut self) -> Result<(), AdvancePersistenceError> {
         // If we have an on-disk reorg, we need to handle it first before touching the in-memory
         // state.
         if let Some(remove_above) = self.find_disk_reorg()? {
-            self.remove_blocks(remove_above);
+            self.remove_blocks(remove_above)?;
             return Ok(())
         }
 
@@ -2791,7 +2828,9 @@ where
                 {
                     // we're also persisting the finalized block on disk so we can reload it on
                     // restart this is required by optimism which queries the finalized block: <https://github.com/ethereum-optimism/optimism/blob/c383eb880f307caa3ca41010ec10f30f08396b2e/op-node/rollup/sync/start.go#L65-L65>
-                    let _ = self.persistence.save_finalized_block_number(finalized.number());
+                    if let Err(err) = self.persistence.save_finalized_block_number(finalized.number()) {
+                        error!(target: "engine::tree", %err, "Persistence service died; cannot save finalized block number — node will halt on next persistence cycle");
+                    }
                     self.canonical_in_memory_state.set_finalized(finalized);
                 }
             }
@@ -2819,7 +2858,9 @@ where
                 if Some(safe.num_hash()) != self.canonical_in_memory_state.get_safe_num_hash() {
                     // we're also persisting the safe block on disk so we can reload it on
                     // restart this is required by optimism which queries the safe block: <https://github.com/ethereum-optimism/optimism/blob/c383eb880f307caa3ca41010ec10f30f08396b2e/op-node/rollup/sync/start.go#L65-L65>
-                    let _ = self.persistence.save_safe_block_number(safe.number());
+                    if let Err(err) = self.persistence.save_safe_block_number(safe.number()) {
+                        error!(target: "engine::tree", %err, "Persistence service died; cannot save safe block number — node will halt on next persistence cycle");
+                    }
                     self.canonical_in_memory_state.set_safe(safe);
                 }
             }

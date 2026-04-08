@@ -19,6 +19,10 @@ pub enum AdvancePersistenceError {
     /// A provider error
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// The persistence service thread has exited. All subsequent sends will fail and
+    /// in-memory state can no longer be durably committed to disk.
+    #[error("Persistence service has died")]
+    PersistenceServiceDied,
     /// Missing ancestor.
     ///
     /// This error occurs when we need to compute the state root for a block with missing trie
