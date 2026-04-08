@@ -41,7 +41,7 @@ use reth_trie_sparse::{
 };
 use reth_trie_sparse_parallel::{ParallelSparseTrie, ParallelismThresholds};
 use std::sync::{
-    atomic::AtomicBool,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{self, channel, Sender},
     Arc,
 };
@@ -212,12 +212,17 @@ where
         );
 
         // wire the multiproof task to the prewarm task
-        let to_multi_proof = Some(multi_proof_task.state_root_message_sender());
+        let to_multi_proof =
+            Some((multi_proof_task.state_root_message_sender(), Arc::new(AtomicUsize::new(0))));
 
         let (prewarm_rx, execution_rx) = self.spawn_tx_iterator(transactions);
 
-        let prewarm_handle =
-            self.spawn_caching_with(env, prewarm_rx, provider_builder, to_multi_proof.clone());
+        let prewarm_handle = self.spawn_caching_with(
+            env,
+            prewarm_rx,
+            provider_builder,
+            to_multi_proof.as_ref().map(|(sender, _)| sender.clone()),
+        );
 
         // spawn multi-proof task
         self.executor.spawn_blocking(move || {
@@ -371,7 +376,7 @@ where
     /// Spawns the [`SparseTrieTask`] for this payload processor.
     fn spawn_sparse_trie_task<BPF>(
         &self,
-        sparse_trie_rx: mpsc::Receiver<SparseTrieUpdate>,
+        sparse_trie_rx: mpsc::Receiver<Result<SparseTrieUpdate, ParallelStateRootError>>,
         proof_task_handle: BPF,
         state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, ParallelStateRootError>>,
     ) where
@@ -422,8 +427,9 @@ where
 /// Handle to all the spawned tasks.
 #[derive(Debug)]
 pub struct PayloadHandle<Tx, Err> {
-    /// Channel for evm state updates
-    to_multi_proof: Option<Sender<MultiProofMessage>>,
+    /// Channel for evm state updates, paired with a shared reference counter for active
+    /// [`StateHookSender`]s so that `FinishedStateUpdates` is sent exactly once.
+    to_multi_proof: Option<(Sender<MultiProofMessage>, Arc<AtomicUsize>)>,
     // must include the receiver of the state root wired to the sparse trie
     prewarm_handle: CacheTaskHandle,
     /// Receiver for the state root
@@ -449,9 +455,15 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
     /// Returns a state hook to be used to send state updates to this task.
     ///
     /// If a multiproof task is spawned the hook will notify it about new states.
+    ///
+    /// Each call creates one [`StateHookSender`] and increments a shared counter. The
+    /// `FinishedStateUpdates` signal is sent only when the **last** returned hook is dropped,
+    /// so it is safe to call this method more than once.
     pub fn state_hook(&self) -> impl OnStateHook {
-        // convert the channel into a `StateHookSender` that emits an event on drop
-        let to_multi_proof = self.to_multi_proof.clone().map(StateHookSender::new);
+        let to_multi_proof = self.to_multi_proof.as_ref().map(|(sender, ref_count)| {
+            ref_count.fetch_add(1, Ordering::Relaxed);
+            StateHookSender::new(sender.clone(), Arc::clone(ref_count))
+        });
 
         move |source: StateChangeSource, state: &EvmState| {
             if let Some(sender) = &to_multi_proof {

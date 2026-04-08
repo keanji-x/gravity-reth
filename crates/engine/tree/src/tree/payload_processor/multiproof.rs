@@ -7,7 +7,6 @@ use alloy_primitives::{
     map::{B256Set, HashSet},
     B256,
 };
-use derive_more::derive::Deref;
 use metrics::Histogram;
 use reth_errors::ProviderError;
 use reth_metrics::Metrics;
@@ -18,11 +17,16 @@ use reth_trie::{
     updates::TrieUpdatesSorted, DecodedMultiProof, HashedPostState, HashedPostStateSorted,
     HashedStorage, MultiProofTargets, TrieInput,
 };
-use reth_trie_parallel::{proof::ParallelProof, proof_task::ProofTaskManagerHandle};
+use reth_trie_parallel::{
+    proof::ParallelProof,
+    proof_task::ProofTaskManagerHandle,
+    root::ParallelStateRootError,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     ops::DerefMut,
     sync::{
+        atomic::{AtomicUsize, Ordering},
         mpsc::{channel, Receiver, Sender},
         Arc,
     },
@@ -197,19 +201,38 @@ impl ProofSequencer {
 /// This type is intended to be used in combination with the evm executor statehook.
 /// This should trigger once the block has been executed (after) the last state update has been
 /// sent. This triggers the exit condition of the multi proof task.
-#[derive(Deref, Debug)]
-pub(super) struct StateHookSender(Sender<MultiProofMessage>);
+///
+/// Multiple `StateHookSender` instances may be created from the same [`PayloadHandle`] via
+/// repeated calls to [`PayloadHandle::state_hook`]. The `ref_count` counter (shared via `Arc`)
+/// tracks how many live senders exist; `FinishedStateUpdates` is sent only when the **last** one
+/// is dropped, preventing the MultiProofTask from exiting prematurely.
+#[derive(Debug)]
+pub(super) struct StateHookSender {
+    inner: Sender<MultiProofMessage>,
+    /// Shared reference count across all `StateHookSender`s created from the same handle.
+    ref_count: Arc<AtomicUsize>,
+}
 
 impl StateHookSender {
-    pub(crate) const fn new(inner: Sender<MultiProofMessage>) -> Self {
-        Self(inner)
+    pub(crate) fn new(inner: Sender<MultiProofMessage>, ref_count: Arc<AtomicUsize>) -> Self {
+        Self { inner, ref_count }
+    }
+}
+
+impl std::ops::Deref for StateHookSender {
+    type Target = Sender<MultiProofMessage>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 impl Drop for StateHookSender {
     fn drop(&mut self) {
-        // Send completion signal when the sender is dropped
-        let _ = self.0.send(MultiProofMessage::FinishedStateUpdates);
+        // Decrement the shared counter. Only the last active sender (previous value == 1) sends
+        // the completion signal, ensuring FinishedStateUpdates is delivered exactly once.
+        if self.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = self.inner.send(MultiProofMessage::FinishedStateUpdates);
+        }
     }
 }
 
@@ -634,7 +657,7 @@ pub(super) struct MultiProofTask<Factory: DatabaseProviderFactory> {
     /// Sender for state root related messages.
     tx: Sender<MultiProofMessage>,
     /// Sender for state updates emitted by this type.
-    to_sparse_trie: Sender<SparseTrieUpdate>,
+    to_sparse_trie: Sender<Result<SparseTrieUpdate, ParallelStateRootError>>,
     /// Proof targets that have been already fetched.
     fetched_proof_targets: MultiProofTargets,
     /// Tracks keys which have been added and removed throughout the entire block.
@@ -656,7 +679,7 @@ where
         config: MultiProofConfig<Factory>,
         executor: WorkloadExecutor,
         proof_task_handle: ProofTaskManagerHandle<FactoryTx<Factory>>,
-        to_sparse_trie: Sender<SparseTrieUpdate>,
+        to_sparse_trie: Sender<Result<SparseTrieUpdate, ParallelStateRootError>>,
         max_concurrency: usize,
     ) -> Self {
         let (tx, rx) = channel();
@@ -1007,7 +1030,7 @@ where
                             sequence_number,
                             SparseTrieUpdate { state, multiproof: Default::default() },
                         ) {
-                            let _ = self.to_sparse_trie.send(combined_update);
+                            let _ = self.to_sparse_trie.send(Ok(combined_update));
                         }
 
                         if self.is_done(
@@ -1047,7 +1070,7 @@ where
                         if let Some(combined_update) =
                             self.on_proof(proof_calculated.sequence_number, proof_calculated.update)
                         {
-                            let _ = self.to_sparse_trie.send(combined_update);
+                            let _ = self.to_sparse_trie.send(Ok(combined_update));
                         }
 
                         if self.is_done(
@@ -1068,6 +1091,9 @@ where
                             ?err,
                             "proof calculation error"
                         );
+                        let _ = self.to_sparse_trie.send(Err(
+                            ParallelStateRootError::Other(format!("proof calculation error: {err:?}"))
+                        ));
                         return
                     }
                 },
