@@ -3,6 +3,7 @@
 use crate::tree::payload_processor::multiproof::{MultiProofTaskMetrics, SparseTrieUpdate};
 use alloy_primitives::B256;
 use rayon::iter::{ParallelBridge, ParallelIterator};
+use reth_errors::ProviderError;
 use reth_trie::{updates::TrieUpdates, Nibbles};
 use reth_trie_parallel::root::ParallelStateRootError;
 use reth_trie_sparse::{
@@ -24,8 +25,12 @@ where
     BPF::AccountNodeProvider: TrieNodeProvider + Send + Sync,
     BPF::StorageNodeProvider: TrieNodeProvider + Send + Sync,
 {
-    /// Receives updates from the state root task.
-    pub(super) updates: mpsc::Receiver<SparseTrieUpdate>,
+    /// Receives updates from the multiproof task.
+    ///
+    /// Each message is `Ok(update)` for a normal proof result or `Err(err)` when a proof
+    /// calculation failed. An `Err` causes the sparse trie task to abort with that error rather
+    /// than computing a root from incomplete state.
+    pub(super) updates: mpsc::Receiver<Result<SparseTrieUpdate, ProviderError>>,
     /// `SparseStateTrie` used for computing the state root.
     pub(super) trie: SparseStateTrie<A, S>,
     pub(super) metrics: MultiProofTaskMetrics,
@@ -43,7 +48,7 @@ where
 {
     /// Creates a new sparse trie, pre-populating with a [`ClearedSparseStateTrie`].
     pub(super) fn new_with_cleared_trie(
-        updates: mpsc::Receiver<SparseTrieUpdate>,
+        updates: mpsc::Receiver<Result<SparseTrieUpdate, ProviderError>>,
         blinded_provider_factory: BPF,
         metrics: MultiProofTaskMetrics,
         sparse_state_trie: ClearedSparseStateTrie<A, S>,
@@ -77,11 +82,25 @@ where
 
         let mut num_iterations = 0;
 
-        while let Ok(mut update) = self.updates.recv() {
+        while let Ok(msg) = self.updates.recv() {
+            // Propagate any proof calculation error forwarded by the multiproof task.  Without
+            // this check a channel close (caused by the multiproof task returning on error) would
+            // be misinterpreted as normal completion and `root_with_updates` would be called on a
+            // partially-applied trie, producing a silently wrong state root.
+            let mut update = msg.map_err(|e| {
+                ParallelStateRootError::Other(format!("proof calculation error: {e:?}"))
+            })?;
             num_iterations += 1;
             let mut num_updates = 1;
-            while let Ok(next) = self.updates.try_recv() {
-                update.extend(next);
+            while let Ok(msg) = self.updates.try_recv() {
+                match msg {
+                    Ok(next) => update.extend(next),
+                    Err(e) => {
+                        return Err(ParallelStateRootError::Other(format!(
+                            "proof calculation error: {e:?}"
+                        )))
+                    }
+                }
                 num_updates += 1;
             }
 

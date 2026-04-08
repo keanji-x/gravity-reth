@@ -25,6 +25,7 @@ use reth_evm::{
     ConfigureEvm, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
 };
 use reth_primitives_traits::NodePrimitives;
+use reth_errors::ProviderError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DatabaseProviderFactory, StateProviderFactory,
     StateReader,
@@ -180,7 +181,8 @@ where
             + Clone
             + 'static,
     {
-        let (to_sparse_trie, sparse_trie_rx) = channel();
+        let (to_sparse_trie, sparse_trie_rx) =
+            channel::<Result<SparseTrieUpdate, ProviderError>>();
         // spawn multiproof task, save the trie input
         let (trie_input, state_root_config) =
             MultiProofConfig::new_from_input(consistent_view, trie_input);
@@ -371,7 +373,7 @@ where
     /// Spawns the [`SparseTrieTask`] for this payload processor.
     fn spawn_sparse_trie_task<BPF>(
         &self,
-        sparse_trie_rx: mpsc::Receiver<SparseTrieUpdate>,
+        sparse_trie_rx: mpsc::Receiver<Result<SparseTrieUpdate, ProviderError>>,
         proof_task_handle: BPF,
         state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, ParallelStateRootError>>,
     ) where
