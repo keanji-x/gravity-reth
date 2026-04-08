@@ -231,6 +231,13 @@ impl<N: NodePrimitives> TreeState<N> {
                 }
             }
         }
+        // If the canonical head itself was removed, reset the head pointer so that future
+        // `is_canonical` calls don't walk from a hash that no longer exists in `blocks_by_hash`.
+        // We keep the block number correct but use B256::ZERO as a sentinel hash, since there is
+        // no longer an in-memory canonical tip at this level.
+        if self.current_canonical_head.number <= upper_bound {
+            self.current_canonical_head = BlockNumHash { number: upper_bound, hash: B256::ZERO };
+        }
         debug!(target: "engine::tree", ?upper_bound, ?last_persisted_hash, "Removed canonical blocks from the tree");
     }
 
