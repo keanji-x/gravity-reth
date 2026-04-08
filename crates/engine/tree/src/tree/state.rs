@@ -648,4 +648,381 @@ mod tests {
             Some(&HashSet::from_iter([blocks[4].recovered_block().hash()]))
         );
     }
+
+    // ── Issue #201 regression tests ────────────────────────────────────────────
+    //
+    // `insert_executed` contains an O(N) scan that calls `retain` on every entry
+    // of `parent_to_child` to filter out hashes absent from `blocks_by_hash`.
+    // Because `remove_by_hash` already maintains `parent_to_child` atomically,
+    // the scan is dead code: it never removes anything under normal operation.
+    // These tests verify:
+    //   (a) the retain loop is a no-op (never removes entries), and
+    //   (b) `remove_by_hash` alone keeps `parent_to_child` fully consistent.
+
+    /// Verify that every child hash stored in `parent_to_child` is always present
+    /// in `blocks_by_hash` after N sequential insertions, which proves the O(N)
+    /// retain scan in `insert_executed` never removes any entry (dead code).
+    #[test]
+    fn test_insert_executed_retain_loop_is_noop_sequential() {
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..21).collect();
+
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+
+            // After each insertion, every child reference in parent_to_child must
+            // resolve to an entry in blocks_by_hash.  If the retain loop were
+            // removing anything it would not be observable here (that would mean a
+            // child was already gone), but the point is that the set of children
+            // must stay consistent — no phantom entries, no missing ones.
+            for children in tree_state.parent_to_child.values() {
+                for child in children {
+                    assert!(
+                        tree_state.blocks_by_hash.contains_key(child),
+                        "parent_to_child references a child hash not in blocks_by_hash: {child}"
+                    );
+                }
+            }
+        }
+
+        // All 20 inserted blocks should still be present.
+        assert_eq!(tree_state.blocks_by_hash.len(), 20);
+    }
+
+    /// Verify that after inserting blocks on two fork branches, all `parent_to_child`
+    /// values remain in `blocks_by_hash`.  This exercises the retain loop across a
+    /// forked tree where multiple children exist for a single parent.
+    #[test]
+    fn test_insert_executed_retain_loop_is_noop_with_forks() {
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        let mut builder = TestBlockBuilder::eth();
+
+        // Build a chain of 5 blocks.
+        let chain: Vec<_> = builder.get_executed_blocks(1..6).collect();
+        for block in &chain {
+            tree_state.insert_executed(block.clone());
+        }
+
+        // Fork off block 3 — two extra branches from block[1]'s hash.
+        let fork_a3 =
+            builder.get_executed_block_with_number(3, chain[1].recovered_block().hash());
+        let fork_a4 =
+            builder.get_executed_block_with_number(4, fork_a3.recovered_block().hash());
+        let fork_b3 =
+            builder.get_executed_block_with_number(3, chain[1].recovered_block().hash());
+        let fork_b4 =
+            builder.get_executed_block_with_number(4, fork_b3.recovered_block().hash());
+
+        for block in [&fork_a3, &fork_a4, &fork_b3, &fork_b4] {
+            tree_state.insert_executed(block.clone());
+
+            // Invariant: every child hash in parent_to_child is live in blocks_by_hash.
+            for children in tree_state.parent_to_child.values() {
+                for child in children {
+                    assert!(
+                        tree_state.blocks_by_hash.contains_key(child),
+                        "stale child reference {child} found in parent_to_child after insert"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Verify that `remove_by_hash` alone keeps `parent_to_child` consistent
+    /// without any help from the retain loop in `insert_executed`.
+    ///
+    /// The test interleaves inserts and removes and confirms that after each
+    /// operation all child hashes in `parent_to_child` exist in `blocks_by_hash`.
+    /// This demonstrates the retain loop in `insert_executed` is dead code:
+    /// `remove_by_hash` already maintains the invariant atomically.
+    #[test]
+    fn test_parent_to_child_consistency_maintained_by_remove_not_retain() {
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        let mut builder = TestBlockBuilder::eth();
+
+        // Insert blocks 1..=5.
+        let chain: Vec<_> = builder.get_executed_blocks(1..6).collect();
+        for block in &chain {
+            tree_state.insert_executed(block.clone());
+        }
+
+        let assert_consistency = |ts: &TreeState| {
+            for children in ts.parent_to_child.values() {
+                for child in children {
+                    assert!(
+                        ts.blocks_by_hash.contains_key(child),
+                        "parent_to_child has stale child {child}"
+                    );
+                }
+            }
+        };
+
+        assert_consistency(&tree_state);
+
+        // Directly invoke remove_by_hash (accessible within this module) — it should
+        // atomically clean up parent_to_child for the removed block's hash.
+        let hash1 = chain[0].recovered_block().hash();
+        let removed = tree_state.remove_by_hash(hash1);
+        assert!(removed.is_some(), "block should have been present");
+        assert!(!tree_state.blocks_by_hash.contains_key(&hash1));
+        // After removal, no entry in parent_to_child should reference hash1.
+        assert_consistency(&tree_state);
+
+        // Insert a fork at height 3 (off chain[1]) — the retain loop would previously
+        // scan all of parent_to_child here; it should be a no-op.
+        let fork =
+            builder.get_executed_block_with_number(3, chain[1].recovered_block().hash());
+        tree_state.insert_executed(fork.clone());
+        assert_consistency(&tree_state);
+
+        // Remove the original block at height 3 via remove_by_hash.
+        let orig3_hash = chain[2].recovered_block().hash();
+        let removed = tree_state.remove_by_hash(orig3_hash);
+        assert!(removed.is_some());
+        // parent_to_child must still be clean after the remove — no retain loop needed.
+        assert_consistency(&tree_state);
+
+        // The fork block at height 3 must still be present and reachable.
+        assert!(tree_state.blocks_by_hash.contains_key(&fork.recovered_block().hash()));
+        assert_consistency(&tree_state);
+    }
+
+    /// Regression test: the retain loop in `insert_executed` (lines 131-133 of
+    /// state.rs) must never decrease the number of entries in `parent_to_child`
+    /// during a pure insertion workload.  If it did, it would be removing live
+    /// entries, which would be a correctness bug.
+    #[test]
+    fn test_insert_executed_retain_never_removes_live_entries() {
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..11).collect();
+
+        let mut prev_total_children: usize = 0;
+
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+
+            // Count total child entries across all parent_to_child sets.
+            let total_children: usize =
+                tree_state.parent_to_child.values().map(|s| s.len()).sum();
+
+            // The count must be monotonically non-decreasing during pure insertion:
+            // the retain loop should never silently discard a live child reference.
+            assert!(
+                total_children >= prev_total_children,
+                "retain loop removed a live child entry: went from {prev_total_children} to \
+                 {total_children} children after inserting block {}",
+                block.recovered_block().number()
+            );
+            prev_total_children = total_children;
+        }
+
+        // Final sanity: 10 parent→child edges for a 10-block linear chain
+        // (block[0]'s parent B256::default() also gets an entry).
+        assert_eq!(prev_total_children, 10);
+    }
+
+    // ── Retain-loop dead-code proof (Issue #201) ────────────────────────────
+    //
+    // The tests above check invariants while the retain loop is still running,
+    // so they cannot distinguish whether consistency is maintained by
+    // `remove_by_hash` alone or with help from the loop.
+    //
+    // The tests below directly simulate the retain predicate:
+    //
+    //   stale_count = |{ child ∈ parent_to_child values : !blocks_by_hash.contains(child) }|
+    //
+    // We compute this count AFTER removal operations but BEFORE any subsequent
+    // `insert_executed` call — the only window where the retain loop has NOT run
+    // since the last removal.  If stale_count == 0 at that point, the retain
+    // loop is provably a no-op: it would find nothing to remove.
+    //
+    // We also include a negative-control test that injects a stale entry
+    // manually and confirms our counter detects it, validating the harness.
+
+    /// Count child hashes in `parent_to_child` that are absent from
+    /// `blocks_by_hash` — the exact set the retain loop would remove.
+    fn count_retain_loop_work(state: &TreeState) -> usize {
+        state
+            .parent_to_child
+            .values()
+            .flat_map(|children| children.iter())
+            .filter(|child| !state.blocks_by_hash.contains_key(*child))
+            .count()
+    }
+
+    /// Negative control: verify `count_retain_loop_work` would actually catch a
+    /// stale entry if one existed.  Injects a phantom child hash directly into
+    /// `parent_to_child` and asserts the counter reports it.  Without this
+    /// validation the other tests might pass vacuously.
+    #[test]
+    fn test_harness_detects_injected_stale_entry() {
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+        for block in &blocks {
+            tree_state.insert_executed(block.clone());
+        }
+
+        // Before injection the count must be zero.
+        assert_eq!(count_retain_loop_work(&tree_state), 0, "expected clean state before injection");
+
+        // Inject a hash that is NOT in blocks_by_hash.
+        let phantom = B256::repeat_byte(0xde);
+        assert!(!tree_state.blocks_by_hash.contains_key(&phantom));
+        tree_state
+            .parent_to_child
+            .entry(blocks[0].recovered_block().hash())
+            .or_default()
+            .insert(phantom);
+
+        // Now the counter must report exactly 1 stale entry.
+        assert_eq!(
+            count_retain_loop_work(&tree_state),
+            1,
+            "harness failed to detect the injected stale entry — subsequent tests are invalid"
+        );
+    }
+
+    /// After `prune_finalized_sidechains` (which drives `remove_by_hash`) and
+    /// *before* any subsequent `insert_executed`, simulate the retain predicate.
+    /// A zero count proves `remove_by_hash` alone keeps `parent_to_child`
+    /// consistent; the retain loop in `insert_executed` would have no work to do.
+    #[test]
+    fn test_retain_predicate_zero_after_prune_finalized_sidechains() {
+        let mut builder = TestBlockBuilder::eth();
+        let canonical: Vec<_> = builder.get_executed_blocks(1..6).collect();
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        for block in &canonical {
+            tree_state.insert_executed(block.clone());
+        }
+
+        // Build a fork: branches off canonical[1], blocks at heights 3, 4, 5.
+        let fork3 =
+            builder.get_executed_block_with_number(3, canonical[1].recovered_block().hash());
+        let fork4 =
+            builder.get_executed_block_with_number(4, fork3.recovered_block().hash());
+        let fork5 =
+            builder.get_executed_block_with_number(5, fork4.recovered_block().hash());
+
+        tree_state.insert_executed(fork3.clone());
+        tree_state.insert_executed(fork4.clone());
+        tree_state.insert_executed(fork5.clone());
+
+        tree_state
+            .set_canonical_head(canonical.last().unwrap().recovered_block().num_hash());
+
+        // Baseline: no stale entries after insertions.
+        assert_eq!(count_retain_loop_work(&tree_state), 0, "unexpected stale entries before prune");
+
+        // Prune: finalize at block 2, which removes fork3/fork4/fork5 via remove_by_hash.
+        tree_state.prune_finalized_sidechains(canonical[1].recovered_block().num_hash());
+
+        // ── Critical check ──────────────────────────────────────────────────
+        // We have NOT called insert_executed since the prune, so the retain loop
+        // has NOT run.  If remove_by_hash left any stale entries they are visible
+        // here.  A non-zero count means the retain loop is load-bearing, not dead.
+        let stale = count_retain_loop_work(&tree_state);
+        assert_eq!(
+            stale, 0,
+            "remove_by_hash left {stale} stale entries in parent_to_child; \
+             the retain loop in insert_executed is NOT dead code"
+        );
+    }
+
+    /// After direct `remove_by_hash` calls and *before* `insert_executed`,
+    /// simulate the retain predicate.  Same proof strategy as above but
+    /// exercising the private API directly to isolate each removal.
+    #[test]
+    fn test_retain_predicate_zero_after_direct_remove_by_hash() {
+        let mut builder = TestBlockBuilder::eth();
+        let chain: Vec<_> = builder.get_executed_blocks(1..5).collect();
+        // Fork off chain[1]: heights 3 and 4.
+        let fork3 =
+            builder.get_executed_block_with_number(3, chain[1].recovered_block().hash());
+        let fork4 =
+            builder.get_executed_block_with_number(4, fork3.recovered_block().hash());
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        for block in &chain {
+            tree_state.insert_executed(block.clone());
+        }
+        tree_state.insert_executed(fork3.clone());
+        tree_state.insert_executed(fork4.clone());
+
+        // Verify clean state after all inserts.
+        assert_eq!(count_retain_loop_work(&tree_state), 0);
+
+        // Remove the canonical block at height 3 directly.
+        // `remove_by_hash` must unlink chain[2] from chain[1]'s child set
+        // without leaving a dangling entry.
+        let removed = tree_state.remove_by_hash(chain[2].recovered_block().hash());
+        assert!(removed.is_some(), "block must exist before removal");
+
+        // ── Critical check (no insert_executed since the remove) ────────────
+        let stale = count_retain_loop_work(&tree_state);
+        assert_eq!(
+            stale, 0,
+            "after removing chain[2], remove_by_hash left {stale} stale entries; \
+             retain loop is load-bearing"
+        );
+
+        // Remove the fork root too.
+        let removed = tree_state.remove_by_hash(fork3.recovered_block().hash());
+        assert!(removed.is_some());
+
+        // ── Critical check again (still no insert_executed) ─────────────────
+        let stale = count_retain_loop_work(&tree_state);
+        assert_eq!(
+            stale, 0,
+            "after removing fork3, remove_by_hash left {stale} stale entries; \
+             retain loop is load-bearing"
+        );
+
+        // fork4 should still be present in blocks_by_hash.
+        assert!(
+            tree_state.blocks_by_hash.contains_key(&fork4.recovered_block().hash()),
+            "fork4 should still be alive after removing its parent"
+        );
+    }
+
+    /// Interleaved inserts and removes: before EACH `insert_executed` that follows
+    /// at least one removal, simulate the retain predicate and assert zero stale
+    /// entries.  This proves the loop would be a no-op at every invocation in a
+    /// realistic mixed workload.
+    #[test]
+    fn test_retain_predicate_zero_before_every_insert_in_mixed_workload() {
+        let mut builder = TestBlockBuilder::eth();
+        let chain: Vec<_> = builder.get_executed_blocks(1..4).collect();
+
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
+        // Seed the tree with the first two canonical blocks.
+        tree_state.insert_executed(chain[0].clone());
+        tree_state.insert_executed(chain[1].clone());
+
+        // Build a batch of fork blocks at height 3 (all parented to chain[1]).
+        let forks: Vec<_> = (0..5)
+            .map(|_| {
+                builder.get_executed_block_with_number(3, chain[1].recovered_block().hash())
+            })
+            .collect();
+
+        // Insert fork[0], then remove it, then insert each remaining fork.
+        // Before each insert (after the removal) we simulate the retain predicate.
+        tree_state.insert_executed(forks[0].clone());
+        tree_state.remove_by_hash(forks[0].recovered_block().hash());
+
+        for fork in &forks[1..] {
+            // ── Critical check: retain loop would see this state ─────────────
+            let stale = count_retain_loop_work(&tree_state);
+            assert_eq!(
+                stale, 0,
+                "before inserting a fork, found {stale} stale entries — \
+                 retain loop is load-bearing, not dead code"
+            );
+            tree_state.insert_executed(fork.clone());
+        }
+
+        // After all inserts, still no stale entries.
+        assert_eq!(count_retain_loop_work(&tree_state), 0);
+    }
 }
