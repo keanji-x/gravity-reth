@@ -120,9 +120,9 @@ where
                     handles.push(tx);
                 }
 
-                let _ = handles[task_idx].send(executable);
-
-                executing += 1;
+                if handles[task_idx].send(executable).is_ok() {
+                    executing += 1;
+                }
             }
 
             // drop handle and wait for all tasks to finish and drop theirs
