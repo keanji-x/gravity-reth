@@ -599,6 +599,140 @@ mod tests {
         );
     }
 
+    /// Regression test for issue #200:
+    /// `prune_persisted_trie_updates` anchors its retention window to the canonical head rather
+    /// than the finalized block. When finality stalls but new blocks keep arriving, trie updates
+    /// for unfinalized canonical blocks are pruned prematurely.
+    ///
+    /// Scenario: finalized=1000, canonical head advances to 1100 (stalled finality).
+    /// retention = 64. earliest = 1100 - 64 = 1036.
+    /// All entries with block_number <= 1036 are pruned, including unfinalized blocks 1001–1036.
+    /// This test asserts the CORRECT behaviour (retain all entries above finalized=1000)
+    /// and therefore FAILS against the current buggy implementation.
+    #[test]
+    fn test_prune_persisted_trie_updates_premature_prune_stalled_finality() {
+        // finalized at 1000, canonical head has advanced to 1100 due to stalled finality
+        let finalized_num: u64 = 1000;
+        let canonical_head_num: u64 = 1100;
+
+        let mut tree_state: TreeState<EthPrimitives> = TreeState::new(
+            BlockNumHash::new(canonical_head_num, B256::random()),
+            EngineApiKind::Ethereum,
+        );
+
+        // Populate persisted_trie_updates for every block from finalized+1 up to canonical head.
+        // These all represent unfinalized canonical blocks; none should be pruned.
+        let mut hashes: Vec<(u64, B256)> = Vec::new();
+        for block_num in (finalized_num + 1)..=canonical_head_num {
+            let hash = B256::random();
+            tree_state
+                .persisted_trie_updates
+                .insert(hash, (block_num, Arc::new(TrieUpdates::default())));
+            hashes.push((block_num, hash));
+        }
+
+        // retention = EPOCH_SLOTS * 2 = 64 for Ethereum
+        // earliest_retained = canonical_head - 64 = 1100 - 64 = 1036
+        // Buggy code prunes entries with block_number <= 1036, i.e. blocks 1001..=1036
+        tree_state.prune_persisted_trie_updates();
+
+        // CORRECT expectation: every entry for block > finalized_num should be retained,
+        // because those blocks are not yet finalized and are needed for reorg recovery.
+        // The buggy implementation will fail these assertions.
+        for (block_num, hash) in &hashes {
+            assert!(
+                tree_state.persisted_trie_updates.contains_key(hash),
+                "block {} is unfinalized (finalized={finalized_num}) but its trie update \
+                 was pruned because canonical_head={canonical_head_num} is far ahead",
+                block_num
+            );
+        }
+    }
+
+    /// Regression test for issue #200 (OP Stack variant):
+    /// The OP Stack retention window is only 32 slots, making premature pruning even worse.
+    /// With finalized=1000 and canonical head at 1050, entries 1001–1018 are pruned.
+    #[test]
+    fn test_prune_persisted_trie_updates_premature_prune_stalled_finality_opstack() {
+        let finalized_num: u64 = 1000;
+        // canonical head is only 50 blocks ahead (half the default Ethereum window),
+        // but OP Stack retention is only 32, so blocks 1001-1018 would still be pruned.
+        let canonical_head_num: u64 = 1050;
+
+        let mut tree_state: TreeState<EthPrimitives> = TreeState::new(
+            BlockNumHash::new(canonical_head_num, B256::random()),
+            EngineApiKind::OpStack,
+        );
+
+        let mut hashes: Vec<(u64, B256)> = Vec::new();
+        for block_num in (finalized_num + 1)..=canonical_head_num {
+            let hash = B256::random();
+            tree_state
+                .persisted_trie_updates
+                .insert(hash, (block_num, Arc::new(TrieUpdates::default())));
+            hashes.push((block_num, hash));
+        }
+
+        // retention = EPOCH_SLOTS = 32 for OP Stack
+        // earliest_retained = 1050 - 32 = 1018
+        // buggy code prunes entries with block_number <= 1018, i.e. blocks 1001..=1018
+        tree_state.prune_persisted_trie_updates();
+
+        // All entries above finalized_num should survive.
+        for (block_num, hash) in &hashes {
+            assert!(
+                tree_state.persisted_trie_updates.contains_key(hash),
+                "OP Stack: block {} is unfinalized (finalized={finalized_num}) but was pruned \
+                 because canonical_head={canonical_head_num} is far ahead",
+                block_num
+            );
+        }
+    }
+
+    /// Regression test for issue #200 (prune_finalized_sidechains path):
+    /// `prune_finalized_sidechains` calls `prune_persisted_trie_updates`, which is anchored to
+    /// the canonical head. When called with a finalized block that is far behind the canonical
+    /// head, trie updates for blocks between (finalized, canonical_head - retention] are pruned.
+    #[test]
+    fn test_prune_finalized_sidechains_retains_unfinalized_trie_updates() {
+        let finalized_num: u64 = 1000;
+        let canonical_head_num: u64 = 1100;
+
+        // retention = 64 (Ethereum), earliest = 1100 - 64 = 1036
+        // Any block 1001..=1036 will be incorrectly pruned by the buggy implementation.
+        let target_block_num: u64 = 1010; // unfinalized, below earliest
+
+        let mut tree_state: TreeState<EthPrimitives> = TreeState::new(
+            BlockNumHash::new(canonical_head_num, B256::random()),
+            EngineApiKind::Ethereum,
+        );
+
+        let target_hash = B256::random();
+        tree_state.persisted_trie_updates.insert(
+            target_hash,
+            (target_block_num, Arc::new(TrieUpdates::default())),
+        );
+
+        // also add a block that should legitimately be pruned (well below finalized)
+        let old_hash = B256::random();
+        tree_state
+            .persisted_trie_updates
+            .insert(old_hash, (900, Arc::new(TrieUpdates::default())));
+
+        let finalized_hash = B256::random();
+        tree_state.prune_finalized_sidechains(BlockNumHash::new(finalized_num, finalized_hash));
+
+        // The legitimately old entry (block 900, below finalized 1000) may be pruned.
+        // But the entry for block 1010, which is above finalized (1000), must be retained.
+        assert!(
+            tree_state.persisted_trie_updates.contains_key(&target_hash),
+            "trie update for block {target_block_num} should be retained: it is above finalized \
+             ({finalized_num}) and is needed for reorg recovery, but was pruned because \
+             canonical_head={canonical_head_num} is far ahead (bug: retention anchored to \
+             canonical head, not finalized block)"
+        );
+    }
+
     #[tokio::test]
     async fn test_tree_state_remove_before_lower_finalized() {
         let start_num_hash = BlockNumHash::default();
