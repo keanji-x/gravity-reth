@@ -16,13 +16,6 @@ use std::{
 };
 use tracing::debug;
 
-/// Default number of blocks to retain persisted trie updates
-const DEFAULT_PERSISTED_TRIE_UPDATES_RETENTION: u64 = EPOCH_SLOTS * 2;
-
-/// Number of blocks to retain persisted trie updates for OP Stack chains
-/// OP Stack chains only need `EPOCH_BLOCKS` as reorgs are relevant only when
-/// op-node reorgs to the same chain twice
-const OPSTACK_PERSISTED_TRIE_UPDATES_RETENTION: u64 = EPOCH_SLOTS;
 
 /// Keeps track of the state of the tree.
 ///
@@ -234,20 +227,11 @@ impl<N: NodePrimitives> TreeState<N> {
         debug!(target: "engine::tree", ?upper_bound, ?last_persisted_hash, "Removed canonical blocks from the tree");
     }
 
-    /// Prunes old persisted trie updates based on the current block number
+    /// Prunes old persisted trie updates based on the finalized block number
     /// and chain type (OP Stack or regular)
-    pub(crate) fn prune_persisted_trie_updates(&mut self) {
-        let retention_blocks = if self.engine_kind.is_opstack() {
-            OPSTACK_PERSISTED_TRIE_UPDATES_RETENTION
-        } else {
-            DEFAULT_PERSISTED_TRIE_UPDATES_RETENTION
-        };
-
-        let earliest_block_to_retain =
-            self.current_canonical_head.number.saturating_sub(retention_blocks);
-
+    pub(crate) fn prune_persisted_trie_updates(&mut self, finalized_num: u64) {
         self.persisted_trie_updates
-            .retain(|_, (block_number, _)| *block_number > earliest_block_to_retain);
+            .retain(|_, (block_number, _)| *block_number > finalized_num);
     }
 
     /// Removes all blocks that are below the finalized block, as well as removing non-canonical
@@ -274,7 +258,7 @@ impl<N: NodePrimitives> TreeState<N> {
             }
         }
 
-        self.prune_persisted_trie_updates();
+        self.prune_persisted_trie_updates(finalized_num);
 
         // The only block that should remain at the `finalized` number now, is the finalized
         // block, if it exists.
@@ -634,7 +618,7 @@ mod tests {
         // retention = EPOCH_SLOTS * 2 = 64 for Ethereum
         // earliest_retained = canonical_head - 64 = 1100 - 64 = 1036
         // Buggy code prunes entries with block_number <= 1036, i.e. blocks 1001..=1036
-        tree_state.prune_persisted_trie_updates();
+        tree_state.prune_persisted_trie_updates(finalized_num);
 
         // CORRECT expectation: every entry for block > finalized_num should be retained,
         // because those blocks are not yet finalized and are needed for reorg recovery.
@@ -676,7 +660,7 @@ mod tests {
         // retention = EPOCH_SLOTS = 32 for OP Stack
         // earliest_retained = 1050 - 32 = 1018
         // buggy code prunes entries with block_number <= 1018, i.e. blocks 1001..=1018
-        tree_state.prune_persisted_trie_updates();
+        tree_state.prune_persisted_trie_updates(finalized_num);
 
         // All entries above finalized_num should survive.
         for (block_num, hash) in &hashes {
