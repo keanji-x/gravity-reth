@@ -634,7 +634,11 @@ pub(super) struct MultiProofTask<Factory: DatabaseProviderFactory> {
     /// Sender for state root related messages.
     tx: Sender<MultiProofMessage>,
     /// Sender for state updates emitted by this type.
-    to_sparse_trie: Sender<SparseTrieUpdate>,
+    ///
+    /// Carries `Ok(update)` for normal proof results and `Err(err)` to signal a proof calculation
+    /// failure so the sparse trie task can propagate the error rather than silently computing a
+    /// root from incomplete state.
+    to_sparse_trie: Sender<Result<SparseTrieUpdate, ProviderError>>,
     /// Proof targets that have been already fetched.
     fetched_proof_targets: MultiProofTargets,
     /// Tracks keys which have been added and removed throughout the entire block.
@@ -656,7 +660,7 @@ where
         config: MultiProofConfig<Factory>,
         executor: WorkloadExecutor,
         proof_task_handle: ProofTaskManagerHandle<FactoryTx<Factory>>,
-        to_sparse_trie: Sender<SparseTrieUpdate>,
+        to_sparse_trie: Sender<Result<SparseTrieUpdate, ProviderError>>,
         max_concurrency: usize,
     ) -> Self {
         let (tx, rx) = channel();
@@ -1007,7 +1011,7 @@ where
                             sequence_number,
                             SparseTrieUpdate { state, multiproof: Default::default() },
                         ) {
-                            let _ = self.to_sparse_trie.send(combined_update);
+                            let _ = self.to_sparse_trie.send(Ok(combined_update));
                         }
 
                         if self.is_done(
@@ -1047,7 +1051,7 @@ where
                         if let Some(combined_update) =
                             self.on_proof(proof_calculated.sequence_number, proof_calculated.update)
                         {
-                            let _ = self.to_sparse_trie.send(combined_update);
+                            let _ = self.to_sparse_trie.send(Ok(combined_update));
                         }
 
                         if self.is_done(
@@ -1068,6 +1072,17 @@ where
                             ?err,
                             "proof calculation error"
                         );
+                        // Decrement the inflight counter and drain any queued pending proofs so
+                        // the manager state stays consistent. Without this the counter leaks and
+                        // subsequent block processing would under-schedule proof work.
+                        self.multiproof_manager.on_calculation_complete();
+                        // Explicitly forward the error to the sparse trie task before dropping
+                        // `to_sparse_trie`. If we simply return here the channel closes and the
+                        // sparse trie interprets closure as normal completion, computing
+                        // `root_with_updates` on a partially-applied trie and returning
+                        // `Ok(<wrong_root>)`. Sending `Err` ensures the sparse trie propagates
+                        // the failure rather than silently accepting an incorrect state root.
+                        let _ = self.to_sparse_trie.send(Err(err));
                         return
                     }
                 },
