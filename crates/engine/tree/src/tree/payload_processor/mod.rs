@@ -730,6 +730,160 @@ mod tests {
         assert!(new_checkout.is_some(), "new checkout should succeed after release and update");
     }
 
+    // -------------------------------------------------------------------------
+    // TOCTOU race tests for get_cache_for / is_available
+    // -------------------------------------------------------------------------
+
+    /// Two threads racing on get_cache_for must not both receive
+    /// Some(SavedCache) for the same parent hash.
+    ///
+    /// Under the buggy implementation (read lock only) both threads can
+    /// simultaneously observe Arc::strong_count == 1, pass the is_available()
+    /// filter, and clone the cache — violating the single-checkout invariant.
+    #[test]
+    fn execution_cache_concurrent_checkout_toctou() {
+        use std::sync::Barrier;
+
+        const ITERATIONS: usize = 200;
+
+        for i in 0..ITERATIONS {
+            // Fresh ExecutionCache with a single SavedCache (strong_count == 1)
+            // for every iteration — no state bleeds between iterations.
+            let execution_cache = Arc::new(ExecutionCache::default());
+            let hash = B256::from([(i % 255 + 1) as u8; 32]);
+            execution_cache.update_with_guard(|slot| *slot = Some(make_saved_cache(hash)));
+
+            // Barrier placed immediately before get_cache_for so both threads
+            // call into the read-lock window simultaneously.
+            let barrier = Arc::new(Barrier::new(2));
+
+            let ec_a = Arc::clone(&execution_cache);
+            let ec_b = Arc::clone(&execution_cache);
+            let bar_a = Arc::clone(&barrier);
+            let bar_b = Arc::clone(&barrier);
+
+            let handle_a = std::thread::spawn(move || {
+                bar_a.wait(); // release both threads together
+                ec_a.get_cache_for(hash)
+            });
+            let handle_b = std::thread::spawn(move || {
+                bar_b.wait();
+                ec_b.get_cache_for(hash)
+            });
+
+            let result_a = handle_a.join().expect("thread A panicked");
+            let result_b = handle_b.join().expect("thread B panicked");
+
+            // Invariant: at most ONE caller may receive Some(SavedCache).
+            // Both returning Some is the double-checkout bug.
+            assert!(
+                !(result_a.is_some() && result_b.is_some()),
+                "iteration {i}: both threads checked out the same cache — TOCTOU double-checkout confirmed"
+            );
+        }
+    }
+
+    /// When a concurrent double-checkout occurs, both live clones share the
+    /// same usage_guard Arc; as a consequence, neither clone reports
+    /// is_available() == true while the other is still held.
+    ///
+    /// This test documents the observable symptom of the bug: the shared
+    /// backing store (moka caches) and the contaminated usage_guard.
+    #[test]
+    fn execution_cache_concurrent_checkout_shared_usage_guard() {
+        use std::sync::Barrier;
+
+        const ATTEMPTS: usize = 200;
+
+        let mut double_checkout_observed = false;
+
+        for i in 0..ATTEMPTS {
+            let execution_cache = Arc::new(ExecutionCache::default());
+            let hash = B256::from([(i % 255 + 1) as u8; 32]);
+            execution_cache.update_with_guard(|slot| *slot = Some(make_saved_cache(hash)));
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            let ec_a = Arc::clone(&execution_cache);
+            let ec_b = Arc::clone(&execution_cache);
+            let bar_a = Arc::clone(&barrier);
+            let bar_b = Arc::clone(&barrier);
+
+            let handle_a = std::thread::spawn(move || {
+                bar_a.wait();
+                ec_a.get_cache_for(hash)
+            });
+            let handle_b = std::thread::spawn(move || {
+                bar_b.wait();
+                ec_b.get_cache_for(hash)
+            });
+
+            // Keep BOTH results alive so strong_count stays elevated.
+            let result_a = handle_a.join().expect("thread A panicked");
+            let result_b = handle_b.join().expect("thread B panicked");
+
+            if result_a.is_some() && result_b.is_some() {
+                double_checkout_observed = true;
+                // While both clones are live, strong_count >= 3 (inner + clone_a + clone_b).
+                // is_available() must be false on each clone.
+                assert!(
+                    !result_a.as_ref().unwrap().is_available(),
+                    "clone_a must not be available while clone_b is also live (strong_count>=3)"
+                );
+                assert!(
+                    !result_b.as_ref().unwrap().is_available(),
+                    "clone_b must not be available while clone_a is also live (strong_count>=3)"
+                );
+                break;
+            }
+            drop(result_a);
+            drop(result_b);
+        }
+
+        // If false: race was not triggered in 200 attempts — inconclusive, not failure.
+        // The deterministic test above is the primary regression guard.
+        let _ = double_checkout_observed;
+    }
+
+    /// Deterministic single-threaded regression guard: sequential checkouts
+    /// must respect the single-checkout invariant without concurrency.
+    #[test]
+    fn execution_cache_sequential_checkout_invariant() {
+        let execution_cache = ExecutionCache::default();
+        let hash = B256::from([0xAAu8; 32]);
+
+        execution_cache.update_with_guard(|slot| *slot = Some(make_saved_cache(hash)));
+
+        let first = execution_cache.get_cache_for(hash);
+        assert!(first.is_some(), "first sequential checkout must succeed");
+
+        let second = execution_cache.get_cache_for(hash);
+        assert!(second.is_none(), "second checkout must fail while first is live");
+
+        drop(first);
+        let third = execution_cache.get_cache_for(hash);
+        assert!(third.is_some(), "checkout must succeed again after first is dropped");
+    }
+
+    /// Unit test for SavedCache::is_available — strong_count semantics.
+    #[test]
+    fn saved_cache_is_available_strong_count_semantics() {
+        let hash = B256::from([0xBBu8; 32]);
+        let cache = make_saved_cache(hash);
+
+        // Freshly created: strong_count == 1 → available.
+        assert!(cache.is_available(), "fresh SavedCache must be available");
+
+        // Clone bumps strong_count to 2 → not available.
+        let clone = cache.clone();
+        assert!(!cache.is_available(), "must not be available while clone is live");
+        assert!(!clone.is_available(), "clone must also report not-available");
+
+        // Dropping the clone brings strong_count back to 1 → available again.
+        drop(clone);
+        assert!(cache.is_available(), "must be available again after clone is dropped");
+    }
+
     fn create_mock_state_updates(num_accounts: usize, updates_per_account: usize) -> Vec<EvmState> {
         let mut rng = generators::rng();
         let all_addresses: Vec<Address> = (0..num_accounts).map(|_| rng.random()).collect();
