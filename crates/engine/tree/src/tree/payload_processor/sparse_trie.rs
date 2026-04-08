@@ -275,3 +275,219 @@ where
 
     Ok(elapsed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::payload_processor::multiproof::SparseTrieUpdate;
+    use alloy_primitives::B256;
+    use reth_trie::{DecodedMultiProof, HashedPostState, HashedStorage};
+    use reth_trie_sparse::{
+        provider::DefaultTrieNodeProviderFactory, SerialSparseTrie, SparseTrie, SparseStateTrie,
+    };
+
+    /// Directly demonstrates the mechanism behind issue #168:
+    /// storage tries removed via `take_storage_trie` that are never re-inserted
+    /// are permanently lost, corrupting the trie.
+    ///
+    /// This test simulates the early-return path in `update_sparse_trie` where
+    /// `result?` returns before all storage try results are consumed from the channel.
+    #[test]
+    fn storage_trie_taken_without_reinsert_is_permanently_lost() {
+        let mut trie = SparseStateTrie::<SerialSparseTrie>::default();
+
+        let addr_a = B256::from([0xAAu8; 32]);
+        let addr_c = B256::from([0xCCu8; 32]);
+
+        // Pre-populate the trie with revealed storage tries for A and C.
+        trie.insert_storage_trie(addr_a, SparseTrie::revealed_empty());
+        trie.insert_storage_trie(addr_c, SparseTrie::revealed_empty());
+
+        assert!(trie.storage_trie_ref(&addr_a).is_some(), "A should be present before");
+        assert!(trie.storage_trie_ref(&addr_c).is_some(), "C should be present before");
+
+        // Simulate what update_sparse_trie does: take ALL storage tries out via the
+        // sequential .map() before par_bridge().
+        let trie_a = trie.take_storage_trie(&addr_a);
+        let trie_c = trie.take_storage_trie(&addr_c);
+
+        // After take, both are removed from the trie.
+        assert!(trie.storage_trie_ref(&addr_a).is_none(), "A should be taken out");
+        assert!(trie.storage_trie_ref(&addr_c).is_none(), "C should be taken out");
+
+        // Simulate the early-return path in the `for result in rx` loop:
+        // A's result is consumed (re-inserted), then B's Err causes `result?` to return early.
+        // C's result is never consumed — its storage trie is dropped.
+        trie.insert_storage_trie(addr_a, trie_a.unwrap());
+        drop(trie_c); // C is lost — never re-inserted due to the early return
+
+        // A is correctly back.
+        assert!(trie.storage_trie_ref(&addr_a).is_some(), "A should be re-inserted");
+
+        // CRITICAL BUG (issue #168): C's storage trie is permanently gone.
+        // The trie is now corrupted: it has no subtrie for C, so any subsequent
+        // read/write to C's storage will operate on a blind node, silently producing
+        // wrong state roots for every block that follows.
+        assert!(
+            trie.storage_trie_ref(&addr_c).is_none(),
+            "BUG confirmed: C storage trie is permanently missing after simulated early return"
+        );
+    }
+
+    /// Verifies that `update_sparse_trie` returns an error when a storage entry references
+    /// an address whose storage trie has not been revealed (is blind).
+    ///
+    /// This is the trigger condition for the corruption in issue #168.
+    #[test]
+    fn update_sparse_trie_errors_on_blind_storage_trie() {
+        let provider = DefaultTrieNodeProviderFactory;
+        let mut trie = SparseStateTrie::<SerialSparseTrie>::default();
+
+        // blind_addr has a storage update but NO storage trie in the sparse trie.
+        let blind_addr = B256::from([0xBBu8; 32]);
+
+        let mut state = HashedPostState::default();
+        state.storages.insert(
+            blind_addr,
+            HashedStorage { wiped: false, storage: Default::default() },
+        );
+
+        let update = SparseTrieUpdate { state, multiproof: DecodedMultiProof::default() };
+        let result = update_sparse_trie(&mut trie, update, &provider);
+
+        assert!(
+            result.is_err(),
+            "update_sparse_trie must return Err when storage trie is missing (blind)"
+        );
+    }
+
+    /// Tests the invariant that after `update_sparse_trie` returns an error,
+    /// ALL storage tries that were present before the call are still present after.
+    ///
+    /// With the bug in issue #168, storage tries are removed via `take_storage_trie`
+    /// before parallel processing, but when any worker returns an error the re-insertion
+    /// loop exits early via `result?`, dropping the remaining tries.
+    ///
+    /// NOTE: Whether corruption is observed depends on the order in which the parallel
+    /// workers deliver their results. This test records which tries are present before
+    /// and after, and asserts that none were lost. With the bug, this assertion will
+    /// fail whenever the blind address is NOT last in the channel ordering.
+    #[test]
+    fn update_sparse_trie_must_not_lose_storage_tries_on_error() {
+        let provider = DefaultTrieNodeProviderFactory;
+        let mut trie = SparseStateTrie::<SerialSparseTrie>::default();
+
+        // These addresses have storage tries in the trie.
+        let addr_a = B256::from([0xAAu8; 32]);
+        let addr_c = B256::from([0xCCu8; 32]);
+        let addr_d = B256::from([0xDDu8; 32]);
+
+        // This address has a storage update but NO trie entry → causes Blind error.
+        let addr_b = B256::from([0xBBu8; 32]);
+
+        // Pre-populate the trie with revealed storage tries for A, C, D.
+        for addr in [addr_a, addr_c, addr_d] {
+            trie.insert_storage_trie(addr, SparseTrie::revealed_empty());
+        }
+
+        // Build the state update: A, B (blind), C, D all have storage changes.
+        let mut state = HashedPostState::default();
+        for addr in [addr_a, addr_b, addr_c, addr_d] {
+            state.storages.insert(
+                addr,
+                HashedStorage { wiped: false, storage: Default::default() },
+            );
+        }
+
+        let update = SparseTrieUpdate { state, multiproof: DecodedMultiProof::default() };
+        let result = update_sparse_trie(&mut trie, update, &provider);
+
+        // The function MUST return an error because addr_b has no storage trie.
+        assert!(result.is_err(), "expected Err due to blind storage trie for addr_b");
+
+        // INVARIANT (violated by issue #168):
+        // All storage tries that existed before the call must still exist after the call,
+        // even on the error path. The trie must not be partially mutated.
+        let a_present = trie.storage_trie_ref(&addr_a).is_some();
+        let c_present = trie.storage_trie_ref(&addr_c).is_some();
+        let d_present = trie.storage_trie_ref(&addr_d).is_some();
+
+        assert!(
+            a_present && c_present && d_present,
+            "BUG (issue #168): storage tries lost after error — \
+             addr_a present: {a_present}, addr_c present: {c_present}, \
+             addr_d present: {d_present}. \
+             `take_storage_trie` removes all tries before par_bridge, \
+             but `result?` early-return prevents re-insertion of unconsumed results, \
+             leaving the trie permanently incomplete."
+        );
+    }
+
+    /// Tests that `SparseTrieTask::run()` on error returns a trie that still contains
+    /// all storage subtries (none must have been permanently dropped).
+    ///
+    /// With the bug, `run()` returns `(Err(...), trie)` where `trie` may be missing
+    /// storage subtries. Putting this trie back into `cleared_sparse_trie` (as mod.rs
+    /// line 417 does unconditionally) then corrupts every subsequent block.
+    #[test]
+    fn sparse_trie_task_run_trie_retains_storage_tries_on_error() {
+        use std::sync::mpsc;
+
+        let provider = DefaultTrieNodeProviderFactory;
+
+        // Addresses with storage tries that will be in the trie.
+        let addr_a = B256::from([0xAAu8; 32]);
+        let addr_c = B256::from([0xCCu8; 32]);
+        // This address has no storage trie → triggers Blind error.
+        let addr_b = B256::from([0xBBu8; 32]);
+
+        // Build the initial trie.
+        let mut trie = SparseStateTrie::<SerialSparseTrie>::default();
+        trie.insert_storage_trie(addr_a, SparseTrie::revealed_empty());
+        trie.insert_storage_trie(addr_c, SparseTrie::revealed_empty());
+
+        // Build the state update with all three addresses.
+        let mut state = HashedPostState::default();
+        for addr in [addr_a, addr_b, addr_c] {
+            state.storages.insert(
+                addr,
+                HashedStorage { wiped: false, storage: Default::default() },
+            );
+        }
+
+        // Create the SparseTrieTask channel and send one update that will error.
+        let (tx, rx) = mpsc::channel();
+        let update = SparseTrieUpdate { state, multiproof: DecodedMultiProof::default() };
+        tx.send(update).unwrap();
+        drop(tx); // close the channel so run() terminates after the update
+
+        let metrics = crate::tree::payload_processor::multiproof::MultiProofTaskMetrics::default();
+        let cleared = reth_trie_sparse::ClearedSparseStateTrie::from_state_trie(trie);
+        let task = SparseTrieTask::<DefaultTrieNodeProviderFactory, SerialSparseTrie, SerialSparseTrie>::new_with_cleared_trie(
+            rx,
+            provider,
+            metrics,
+            cleared,
+        );
+
+        let (result, returned_trie) = task.run();
+
+        // run() must report an error.
+        assert!(result.is_err(), "expected run() to return Err on blind storage trie");
+
+        // INVARIANT (violated by issue #168):
+        // The returned trie must still contain all storage tries that were present
+        // before the update was applied. If any are missing, recycling this trie
+        // (as mod.rs line 417 does) will corrupt all subsequent blocks.
+        let a_present = returned_trie.storage_trie_ref(&addr_a).is_some();
+        let c_present = returned_trie.storage_trie_ref(&addr_c).is_some();
+
+        assert!(
+            a_present && c_present,
+            "BUG (issue #168): returned trie is corrupted — \
+             addr_a present: {a_present}, addr_c present: {c_present}. \
+             Recycling this trie (mod.rs:417) will cause silent wrong state roots \
+             for all subsequent blocks."
+        );
+    }
+}
