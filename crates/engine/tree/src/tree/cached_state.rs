@@ -628,6 +628,8 @@ mod tests {
     use alloy_primitives::{B256, U256};
     use rand::Rng;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use reth_revm::db::{AccountStatus, BundleAccount, BundleState};
+    use revm_state::AccountInfo;
     use std::mem::size_of;
 
     mod tracking_allocator {
@@ -853,5 +855,82 @@ mod tests {
 
         drop(guard3);
         assert!(cache.is_available()); // Now available
+    }
+
+    // Issue #184: concurrent insert_storage race produces orphaned AccountStorageCache,
+    // silently losing prewarm writes.
+    //
+    // Root cause: insert_storage uses a non-atomic get-or-insert on the outer
+    // Cache<Address, AccountStorageCache>. Two threads both seeing a miss for the same
+    // address each construct an independent AccountStorageCache, both insert it (the second
+    // replaces the first), then both write to their respective local clones. Because
+    // mini_moka Cache clones share the same Arc<Inner>, thread A's writes go to the inner
+    // map that was replaced in the outer cache and are no longer reachable, i.e. silently lost.
+    //
+    // Fix: use an atomic get-or-insert (e.g. DashMap::entry().or_insert_with) so construction
+    // and insertion are a single indivisible operation.
+    #[test]
+    fn test_insert_storage_concurrent_no_lost_writes_issue_184() {
+        use std::sync::{Arc, Barrier};
+
+        const NUM_THREADS: usize = 16;
+        const ITERATIONS: usize = 200;
+
+        for iteration in 0..ITERATIONS {
+            let cache = Arc::new(ExecutionCacheBuilder::default().build_caches(1_000_000));
+            let address = Address::random();
+            let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+            let slots: Vec<(StorageKey, StorageValue)> = (0..NUM_THREADS)
+                .map(|i| {
+                    let mut key_bytes = [0u8; 32];
+                    key_bytes[31] = i as u8;
+                    (StorageKey::from(key_bytes), StorageValue::from(i as u64 + 1))
+                })
+                .collect();
+
+            let handles: Vec<_> = slots
+                .iter()
+                .map(|(key, value)| {
+                    let cache = Arc::clone(&cache);
+                    let barrier = Arc::clone(&barrier);
+                    let key = *key;
+                    let value = *value;
+                    std::thread::spawn(move || {
+                        // Release all threads simultaneously to maximise the chance that multiple
+                        // threads observe a cache miss for `address` before any insert happens.
+                        barrier.wait();
+                        cache.insert_storage(address, key, Some(value));
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // All written slots must be readable. With the bug present, writes from threads
+            // whose AccountStorageCache was replaced in the outer map are silently discarded.
+            let mut lost = 0usize;
+            for (key, expected) in &slots {
+                match cache.get_storage(&address, key) {
+                    SlotStatus::Value(v) if v == *expected => {}
+                    other => {
+                        lost += 1;
+                        eprintln!(
+                            "iteration {iteration}: lost write key={key:?} \
+                             expected=Value({expected}) got={other:?}"
+                        );
+                    }
+                }
+            }
+
+            assert_eq!(
+                lost,
+                0,
+                "issue #184 (iteration {iteration}): {lost}/{NUM_THREADS} writes lost \
+                 due to non-atomic get-or-insert race in ExecutionCache::insert_storage"
+            );
+        }
     }
 }
