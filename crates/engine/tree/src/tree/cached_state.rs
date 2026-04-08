@@ -1,5 +1,6 @@
 //! Execution cache implementation for block processing.
 use alloy_primitives::{Address, StorageKey, StorageValue, B256};
+use dashmap::DashMap;
 use metrics::Gauge;
 use mini_moka::sync::CacheBuilder;
 use reth_errors::ProviderResult;
@@ -300,9 +301,11 @@ pub(crate) struct ExecutionCache {
     /// Cache for contract bytecode, keyed by code hash.
     code_cache: Cache<B256, Option<Bytecode>>,
 
-    /// Per-account storage cache: outer cache keyed by Address, inner cache tracks that account’s
-    /// storage slots.
-    storage_cache: Cache<Address, AccountStorageCache>,
+    /// Per-account storage cache: outer map keyed by Address, inner cache tracks that account's
+    /// storage slots. Uses DashMap for atomic get-or-insert to avoid a race where two threads both
+    /// observe a missing entry, each construct a new AccountStorageCache, and one's insert
+    /// overwrites the other's — silently discarding the writes backed by the orphaned Arc.
+    storage_cache: Arc<DashMap<Address, AccountStorageCache>>,
 
     /// Cache for basic account information (nonce, balance, code hash).
     account_cache: Cache<Address, Option<Account>>,
@@ -329,22 +332,20 @@ impl ExecutionCache {
         key: StorageKey,
         value: Option<StorageValue>,
     ) {
-        let account_cache = self.storage_cache.get(&address).unwrap_or_else(|| {
-            let account_cache = AccountStorageCache::default();
-            self.storage_cache.insert(address, account_cache.clone());
-            account_cache
-        });
-        account_cache.insert_storage(key, value);
+        self.storage_cache
+            .entry(address)
+            .or_insert_with(AccountStorageCache::default)
+            .insert_storage(key, value);
     }
 
     /// Invalidate storage for specific account
     pub(crate) fn invalidate_account_storage(&self, address: &Address) {
-        self.storage_cache.invalidate(address);
+        self.storage_cache.remove(address);
     }
 
     /// Returns the total number of storage slots cached across all accounts
     pub(crate) fn total_storage_slots(&self) -> usize {
-        self.storage_cache.iter().map(|addr| addr.len()).sum()
+        self.storage_cache.iter().map(|e| e.len()).sum()
     }
 
     /// Inserts the post-execution state changes into the cache.
@@ -417,9 +418,6 @@ pub(crate) struct ExecutionCacheBuilder {
     /// Code cache entries
     code_cache_entries: u64,
 
-    /// Storage cache entries
-    storage_cache_entries: u64,
-
     /// Account cache entries
     account_cache_entries: u64,
 }
@@ -427,24 +425,13 @@ pub(crate) struct ExecutionCacheBuilder {
 impl ExecutionCacheBuilder {
     /// Build an [`ExecutionCache`] struct, so that execution caches can be easily cloned.
     pub(crate) fn build_caches(self, total_cache_size: u64) -> ExecutionCache {
-        let storage_cache_size = (total_cache_size * 8888) / 10000; // 88.88% of total
         let account_cache_size = (total_cache_size * 556) / 10000; // 5.56% of total
         let code_cache_size = (total_cache_size * 556) / 10000; // 5.56% of total
 
         const EXPIRY_TIME: Duration = Duration::from_secs(7200); // 2 hours
         const TIME_TO_IDLE: Duration = Duration::from_secs(3600); // 1 hour
 
-        let storage_cache = CacheBuilder::new(self.storage_cache_entries)
-            .weigher(|_key: &Address, value: &AccountStorageCache| -> u32 {
-                // values based on results from measure_storage_cache_overhead test
-                let base_weight = 39_000;
-                let slots_weight = value.len() * 218;
-                (base_weight + slots_weight) as u32
-            })
-            .max_capacity(storage_cache_size)
-            .time_to_live(EXPIRY_TIME)
-            .time_to_idle(TIME_TO_IDLE)
-            .build_with_hasher(DefaultHashBuilder::default());
+        let storage_cache = Arc::new(DashMap::default());
 
         let account_cache = CacheBuilder::new(self.account_cache_entries)
             .weigher(|_key: &Address, value: &Option<Account>| -> u32 {
@@ -498,13 +485,8 @@ impl Default for ExecutionCacheBuilder {
         // memory usage which is controlled by max_capacity.
         //
         // Code cache: up to 10M entries but limited to 0.5GB
-        // Storage cache: up to 10M accounts but limited to 8GB
         // Account cache: up to 10M accounts but limited to 0.5GB
-        Self {
-            code_cache_entries: 10_000_000,
-            storage_cache_entries: 10_000_000,
-            account_cache_entries: 10_000_000,
-        }
+        Self { code_cache_entries: 10_000_000, account_cache_entries: 10_000_000 }
     }
 }
 

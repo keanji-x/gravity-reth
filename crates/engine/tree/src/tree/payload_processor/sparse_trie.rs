@@ -6,7 +6,7 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_trie::{updates::TrieUpdates, Nibbles};
 use reth_trie_parallel::root::ParallelStateRootError;
 use reth_trie_sparse::{
-    errors::{SparseStateTrieResult, SparseTrieErrorKind},
+    errors::{SparseStateTrieResult, SparseTrieError, SparseTrieErrorKind},
     provider::{TrieNodeProvider, TrieNodeProviderFactory},
     ClearedSparseStateTrie, SerialSparseTrie, SparseStateTrie, SparseTrieInterface,
 };
@@ -166,43 +166,57 @@ where
             let _enter = span.enter();
             trace!(target: "engine::root::sparse", "Updating storage");
             let storage_provider = blinded_provider_factory.storage_node_provider(address);
-            let mut storage_trie = storage_trie.ok_or(SparseTrieErrorKind::Blind)?;
 
-            if storage.wiped {
-                trace!(target: "engine::root::sparse", "Wiping storage");
-                storage_trie.wipe()?;
-            }
+            // If the trie was not found, report an error. There is no trie to re-insert.
+            let Some(mut storage_trie) = storage_trie else {
+                return (address, None, Some(SparseTrieError::from(SparseTrieErrorKind::Blind)));
+            };
 
-            // Defer leaf removals until after updates/additions, so that we don't delete an
-            // intermediate branch node during a removal and then re-add that branch back during a
-            // later leaf addition. This is an optimization, but also a requirement inherited from
-            // multiproof generating, which can't know the order that leaf operations happen in.
-            let mut removed_slots = SmallVec::<[Nibbles; 8]>::new();
-
-            for (slot, value) in storage.storage {
-                let slot_nibbles = Nibbles::unpack(slot);
-
-                if value.is_zero() {
-                    removed_slots.push(slot_nibbles);
-                    continue;
+            // Perform all fallible storage operations inside an inner closure so that, on
+            // failure, the trie is still returned through the channel and can be re-inserted
+            // into the main sparse trie rather than being permanently dropped.
+            let result: Result<(), SparseTrieError> = (|| {
+                if storage.wiped {
+                    trace!(target: "engine::root::sparse", "Wiping storage");
+                    storage_trie.wipe()?;
                 }
 
-                trace!(target: "engine::root::sparse", ?slot_nibbles, "Updating storage slot");
-                storage_trie.update_leaf(
-                    slot_nibbles,
-                    alloy_rlp::encode_fixed_size(&value).to_vec(),
-                    &storage_provider,
-                )?;
+                // Defer leaf removals until after updates/additions, so that we don't delete an
+                // intermediate branch node during a removal and then re-add that branch back
+                // during a later leaf addition. This is an optimization, but also a requirement
+                // inherited from multiproof generating, which can't know the order that leaf
+                // operations happen in.
+                let mut removed_slots = SmallVec::<[Nibbles; 8]>::new();
+
+                for (slot, value) in storage.storage {
+                    let slot_nibbles = Nibbles::unpack(slot);
+
+                    if value.is_zero() {
+                        removed_slots.push(slot_nibbles);
+                        continue;
+                    }
+
+                    trace!(target: "engine::root::sparse", ?slot_nibbles, "Updating storage slot");
+                    storage_trie.update_leaf(
+                        slot_nibbles,
+                        alloy_rlp::encode_fixed_size(&value).to_vec(),
+                        &storage_provider,
+                    )?;
+                }
+
+                for slot_nibbles in removed_slots {
+                    trace!(target: "engine::root::sparse", ?slot_nibbles, "Removing storage slot");
+                    storage_trie.remove_leaf(&slot_nibbles, &storage_provider)?;
+                }
+
+                Ok(())
+            })();
+
+            if result.is_ok() {
+                storage_trie.root();
             }
 
-            for slot_nibbles in removed_slots {
-                trace!(target: "engine::root::sparse", ?slot_nibbles, "Removing storage slot");
-                storage_trie.remove_leaf(&slot_nibbles, &storage_provider)?;
-            }
-
-            storage_trie.root();
-
-            SparseStateTrieResult::Ok((address, storage_trie))
+            (address, Some(storage_trie), result.err())
         })
         .for_each_init(
             || tx.clone(),
@@ -218,44 +232,68 @@ where
     // can't know the order that leaf operations happen in.
     let mut removed_accounts = Vec::new();
 
-    // Update account storage roots
-    for result in rx {
-        let (address, storage_trie) = result?;
-        trie.insert_storage_trie(address, storage_trie);
+    // Update account storage roots.
+    // Drain the entire channel regardless of errors so that every trie that was taken out of
+    // the main sparse trie via `take_storage_trie` is unconditionally re-inserted. Breaking
+    // early on error would permanently drop any trie that was taken but not yet processed,
+    // causing a `Blind` error for that address on every subsequent block.
+    let mut storage_error: Option<SparseTrieError> = None;
+    for (address, storage_trie_opt, error) in rx {
+        // Always re-insert the trie when we have one, even when an error occurred.
+        if let Some(storage_trie) = storage_trie_opt {
+            trie.insert_storage_trie(address, storage_trie);
 
-        if let Some(account) = state.accounts.remove(&address) {
-            // If the account itself has an update, remove it from the state update and update in
-            // one go instead of doing it down below.
-            trace!(target: "engine::root::sparse", ?address, "Updating account and its storage root");
-            if !trie.update_account(
-                address,
-                account.unwrap_or_default(),
-                blinded_provider_factory,
-            )? {
-                removed_accounts.push(address);
+            // Only update account state when this particular storage trie succeeded.
+            if error.is_none() {
+                if let Some(account) = state.accounts.remove(&address) {
+                    // If the account itself has an update, remove it from the state update and
+                    // update in one go instead of doing it down below.
+                    trace!(target: "engine::root::sparse", ?address, "Updating account and its storage root");
+                    if !trie.update_account(
+                        address,
+                        account.unwrap_or_default(),
+                        blinded_provider_factory,
+                    )? {
+                        removed_accounts.push(address);
+                    }
+                } else if trie.is_account_revealed(address) {
+                    // Otherwise, if the account is revealed, only update its storage root.
+                    trace!(target: "engine::root::sparse", ?address, "Updating account storage root");
+                    if !trie.update_account_storage_root(address, blinded_provider_factory)? {
+                        removed_accounts.push(address);
+                    }
+                }
             }
-        } else if trie.is_account_revealed(address) {
-            // Otherwise, if the account is revealed, only update its storage root.
-            trace!(target: "engine::root::sparse", ?address, "Updating account storage root");
-            if !trie.update_account_storage_root(address, blinded_provider_factory)? {
+        }
+
+        // Record the first storage error; keep draining so all tries are re-inserted.
+        if storage_error.is_none() {
+            storage_error = error;
+        }
+    }
+
+    // If a storage error occurred, skip further account updates but still remove any accounts
+    // that were already queued for removal before the error was encountered.
+    if storage_error.is_none() {
+        // Update accounts
+        for (address, account) in state.accounts {
+            trace!(target: "engine::root::sparse", ?address, "Updating account");
+            if !trie.update_account(address, account.unwrap_or_default(), blinded_provider_factory)? {
                 removed_accounts.push(address);
             }
         }
     }
 
-    // Update accounts
-    for (address, account) in state.accounts {
-        trace!(target: "engine::root::sparse", ?address, "Updating account");
-        if !trie.update_account(address, account.unwrap_or_default(), blinded_provider_factory)? {
-            removed_accounts.push(address);
-        }
-    }
-
-    // Remove accounts
+    // Remove accounts — always run so that accounts queued before a storage error are not left
+    // as ghost leaf nodes in the recycled trie.
     for address in removed_accounts {
         trace!(target: "trie::sparse", ?address, "Removing account");
         let nibbles = Nibbles::unpack(address);
         trie.remove_account_leaf(&nibbles, blinded_provider_factory)?;
+    }
+
+    if let Some(e) = storage_error {
+        return Err(e.into());
     }
 
     let elapsed_before = started_at.elapsed();
