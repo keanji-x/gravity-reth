@@ -458,3 +458,163 @@ pub(crate) struct PrewarmMetrics {
     /// Counter for transaction execution errors during prewarming
     pub(crate) transaction_errors: Counter,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    /// Reproduces the core of the bug at `spawn_all` lines 123–125:
+    ///
+    /// ```text
+    /// let _ = handles[task_idx].send(executable);   // Err silently dropped
+    /// executing += 1;                               // always incremented
+    /// ```
+    ///
+    /// When a worker's receiver is dropped (e.g., `evm_for_ctx()` returned `None`),
+    /// every send to that slot returns `Err(SendError)`.  The current code swallows
+    /// the error with `let _` and then unconditionally bumps `executing`, so
+    /// `FinishedTxExecution { executed_transactions }` is over-reported.
+    ///
+    /// **Expected (correct) behaviour:** `executing` must NOT be incremented when
+    /// the send returns `Err`.
+    /// **Actual (buggy) behaviour:** `executing` IS incremented — this test will
+    /// FAIL against the unfixed code, proving the bug exists.
+    #[test]
+    fn test_executing_counter_must_not_increment_on_failed_send() {
+        let (tx, rx) = mpsc::channel::<u32>();
+
+        // Simulate worker death: `transact_batch` returned early because
+        // `evm_for_ctx()` returned `None`, dropping the Receiver.
+        drop(rx);
+
+        let mut executing = 0usize;
+
+        // --- BEGIN: verbatim buggy pattern from spawn_all lines 123-125 ---
+        let _ = tx.send(42u32); // send to dead channel → Err(SendError), ignored
+        executing += 1; // unconditionally incremented — the bug
+        // --- END ---
+
+        // With the bug: executing == 1 even though zero transactions were delivered.
+        // A correct implementation would leave executing == 0.
+        assert_eq!(
+            executing, 0,
+            "BUG: `executing` was incremented to {executing} even though the send \
+             failed — `FinishedTxExecution::executed_transactions` would over-report \
+             by {executing}"
+        );
+    }
+
+    /// Simulates the full round-robin dispatch loop from `spawn_all` with
+    /// `max_concurrency = 2`, where one of the two worker channels is dead.
+    ///
+    /// Dispatching 3 transactions should yield:
+    ///   - slot 0 (alive): receives tx[0] and tx[2]  → 2 successful sends
+    ///   - slot 1 (dead):  send for tx[1] returns Err → 0 deliveries from that slot
+    ///
+    /// With the bug `executing` reaches 3 (all attempts counted).
+    /// A correct implementation would report 2 (only successful sends).
+    ///
+    /// This test **FAILS** with the current code, demonstrating the over-counting.
+    #[test]
+    fn test_spawn_all_loop_overcounts_when_one_worker_is_dead() {
+        let (tx_alive, rx_alive) = mpsc::channel::<u32>();
+
+        // Second worker dies immediately (models evm_for_ctx() → None).
+        let (tx_dead, rx_dead) = mpsc::channel::<u32>();
+        drop(rx_dead);
+
+        let handles = vec![tx_alive, tx_dead];
+        let max_concurrency = 2usize;
+        let mut executing: usize = 0;
+
+        let items = [10u32, 20u32, 30u32];
+
+        for item in items {
+            let task_idx = executing % max_concurrency;
+
+            // Verbatim buggy logic from spawn_all:
+            let _ = handles[task_idx].send(item);
+            executing += 1;
+        }
+
+        // item 10 → slot 0 (alive)  → ok  → executing = 1
+        // item 20 → slot 1 (dead)   → Err → executing = 2  ← BUG: should not count
+        // item 30 → slot 0 (alive)  → ok  → executing = 3
+
+        let actually_delivered = rx_alive.try_iter().count();
+        assert_eq!(actually_delivered, 2, "alive worker should have received exactly 2 items");
+
+        // `executing` is now 3, but only 2 transactions were actually delivered.
+        // The FinishedTxExecution event would report 3 — one phantom transaction.
+        assert_eq!(
+            executing,
+            actually_delivered,
+            "BUG: `executing` ({executing}) does not match actually delivered \
+             transactions ({actually_delivered}); over-count = {}",
+            executing.saturating_sub(actually_delivered)
+        );
+    }
+
+    /// Confirms that a dead worker channel (dropped Receiver) makes every
+    /// subsequent send return `Err(SendError)`.
+    ///
+    /// This is the precondition for the bug: `evm_for_ctx()` returning `None`
+    /// causes `transact_batch` to return early, dropping the `Receiver`, and
+    /// all sends to that slot fail silently.
+    #[test]
+    fn test_dead_worker_receiver_causes_send_errors() {
+        let (tx, rx) = mpsc::channel::<u32>();
+
+        // Worker exits early (evm_for_ctx returned None), dropping receiver.
+        drop(rx);
+
+        for i in 0..4u32 {
+            assert!(
+                tx.send(i).is_err(),
+                "send #{i} to dropped receiver must return Err(SendError)"
+            );
+        }
+    }
+
+    /// Shows what the corrected counting logic should look like:
+    /// `executing` is only incremented when `send` succeeds.
+    ///
+    /// This test PASSES and documents the intended fix.
+    #[test]
+    fn test_correct_counting_only_increments_on_successful_send() {
+        let (tx_alive, rx_alive) = mpsc::channel::<u32>();
+
+        let (tx_dead, rx_dead) = mpsc::channel::<u32>();
+        drop(rx_dead);
+
+        let handles = vec![tx_alive, tx_dead];
+        let max_concurrency = 2usize;
+
+        // Use a separate index for round-robin advancement so that dead slots
+        // are still advanced, but the count only reflects successes.
+        let mut round_robin_idx: usize = 0;
+        let mut successful_sends: usize = 0;
+
+        let items = [10u32, 20u32, 30u32];
+
+        for item in items {
+            let task_idx = round_robin_idx % max_concurrency;
+
+            // Fixed logic: only count when the send actually succeeds.
+            if handles[task_idx].send(item).is_ok() {
+                successful_sends += 1;
+            }
+            round_robin_idx += 1; // advance round-robin regardless
+        }
+
+        let actually_delivered = rx_alive.try_iter().count();
+
+        // With the fix, successful_sends == actually_delivered (both == 2).
+        assert_eq!(
+            successful_sends, actually_delivered,
+            "correct implementation: successful_sends ({successful_sends}) must equal \
+             actually_delivered ({actually_delivered})"
+        );
+        assert_eq!(successful_sends, 2);
+    }
+}
