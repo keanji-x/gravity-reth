@@ -1623,4 +1623,141 @@ mod tests {
         // only slots in the state update can be included, so slot3 should not appear
         assert!(!targets.contains_key(&addr));
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #170: Multiple state_hook() calls create independent StateHookSenders
+    // that each send FinishedStateUpdates on drop, allowing the MultiProofTask to
+    // exit before the second hook has delivered any state updates.
+    // -------------------------------------------------------------------------
+
+    /// A single `StateHookSender` drop must enqueue exactly one `FinishedStateUpdates`.
+    #[test]
+    fn test_state_hook_sender_drop_sends_finished_state_updates() {
+        let (tx, rx) = channel::<MultiProofMessage>();
+        let hook = StateHookSender::new(tx);
+
+        drop(hook);
+
+        let msg = rx.recv().expect("expected FinishedStateUpdates after drop");
+        assert!(
+            matches!(msg, MultiProofMessage::FinishedStateUpdates),
+            "expected FinishedStateUpdates, got {msg:?}"
+        );
+        // Channel must be empty after the single drop.
+        assert!(
+            rx.try_recv().is_err(),
+            "expected exactly one message, but channel still has data"
+        );
+    }
+
+    /// Calling state_hook() twice (simulated by creating two StateHookSenders from the same
+    /// channel sender) produces two *independent* FinishedStateUpdates signals.
+    ///
+    /// This demonstrates the bug: when both hooks are dropped in sequence the task will
+    /// receive FinishedStateUpdates from the first drop and – if no proofs are in-flight –
+    /// declare completion before the second hook has forwarded any state updates.
+    #[test]
+    fn test_two_state_hook_senders_both_emit_finished_state_updates() {
+        let (tx, rx) = channel::<MultiProofMessage>();
+
+        // Simulate what PayloadHandle::state_hook() does on each call:
+        // it clones `to_multi_proof` and wraps the clone in a new StateHookSender.
+        let hook1 = StateHookSender::new(tx.clone());
+        let hook2 = StateHookSender::new(tx.clone());
+        // Drop the original sender so the receiver can detect channel closure.
+        drop(tx);
+
+        // Dropping hook1 immediately fires the first FinishedStateUpdates.
+        drop(hook1);
+
+        let first = rx.recv().expect("expected first FinishedStateUpdates");
+        assert!(
+            matches!(first, MultiProofMessage::FinishedStateUpdates),
+            "first message should be FinishedStateUpdates, got {first:?}"
+        );
+
+        // The channel is NOT exhausted yet – hook2 is still alive.
+        // In the real task this first signal already sets updates_finished = true.
+
+        // Dropping hook2 fires the second FinishedStateUpdates.
+        drop(hook2);
+
+        let second = rx.recv().expect("expected second FinishedStateUpdates");
+        assert!(
+            matches!(second, MultiProofMessage::FinishedStateUpdates),
+            "second message should be FinishedStateUpdates, got {second:?}"
+        );
+    }
+
+    /// `is_done()` returns true with updates_finished=true and zero in-flight proofs.
+    ///
+    /// This is the exact condition that the MultiProofTask evaluates when it receives
+    /// the *first* FinishedStateUpdates (from hook1 drop) while hook2 is still live.
+    /// The task will break its message loop at that point, silently discarding any
+    /// state updates that hook2 has not yet sent.
+    #[test]
+    fn test_is_done_returns_true_after_first_hook_drop_with_no_inflight_proofs() {
+        let factory = create_test_provider_factory();
+        let task = create_test_state_root_task(factory);
+
+        // Preconditions mirror the state of MultiProofTask immediately after receiving
+        // the first FinishedStateUpdates when hook1 is dropped early (no state updates
+        // have been requested yet, no prefetch proofs, no pending proofs).
+        let proofs_processed = 0u64;
+        let state_update_proofs_requested = 0u64;
+        let prefetch_proofs_requested = 0u64;
+        let updates_finished = true; // set by the first FinishedStateUpdates
+
+        let done = task.is_done(
+            proofs_processed,
+            state_update_proofs_requested,
+            prefetch_proofs_requested,
+            updates_finished,
+        );
+
+        assert!(
+            done,
+            "is_done() returns true when updates_finished is set by the first hook drop \
+             even though a second hook is still alive – this is the premature exit bug"
+        );
+    }
+
+    /// Demonstrates the end-to-end race: after the MultiProofTask would have exited
+    /// (receiver closed) a second StateHookSender's send returns an error, proving
+    /// that its state contributions are silently lost.
+    #[test]
+    fn test_second_hook_state_updates_lost_after_first_hook_triggers_task_exit() {
+        use alloy_evm::block::StateChangeSource;
+
+        let (tx, rx) = channel::<MultiProofMessage>();
+
+        let hook1 = StateHookSender::new(tx.clone());
+        let hook2 = StateHookSender::new(tx.clone());
+        drop(tx);
+
+        // hook1 is dropped without sending any state – fires FinishedStateUpdates.
+        drop(hook1);
+
+        // Consume that signal – this simulates the task processing FinishedStateUpdates
+        // and deciding is_done() == true (0 proofs in-flight).
+        let signal = rx.recv().unwrap();
+        assert!(matches!(signal, MultiProofMessage::FinishedStateUpdates));
+
+        // Now simulate the task exiting: drop the receiver.
+        drop(rx);
+
+        // hook2 is still alive and attempts to send a state update.
+        let send_result = hook2
+            .send(MultiProofMessage::StateUpdate(StateChangeSource::Transaction(0), Default::default()));
+
+        assert!(
+            send_result.is_err(),
+            "sending state via hook2 must fail once the task has exited, \
+             confirming the state update is silently dropped"
+        );
+
+        // hook2 drop also fires FinishedStateUpdates, but the channel is gone.
+        // No panic – errors are silently swallowed, matching the real code path.
+        drop(hook2); // should not panic
+    }
 }
