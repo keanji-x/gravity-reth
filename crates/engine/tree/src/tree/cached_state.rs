@@ -16,7 +16,7 @@ use reth_trie::{
 };
 use revm_primitives::map::DefaultHashBuilder;
 use std::{sync::Arc, time::Duration};
-use tracing::trace;
+use tracing::{trace, warn};
 
 pub(crate) type Cache<K, V> =
     mini_moka::sync::Cache<K, V, alloy_primitives::map::DefaultHashBuilder>;
@@ -366,10 +366,13 @@ impl ExecutionCache {
     ///
     /// Returns an error if the state updates are inconsistent and should be discarded.
     pub(crate) fn insert_state(&self, state_updates: &BundleState) -> Result<(), ()> {
-        // Insert bytecodes
-        for (code_hash, bytecode) in &state_updates.contracts {
-            self.code_cache.insert(*code_hash, Some(Bytecode(bytecode.clone())));
-        }
+        // Buffer bytecodes locally; only flush to the shared cache after Phase 2 succeeds so
+        // that a Phase 2 error cannot leave orphaned bytecodes in the shared Arc'd code_cache.
+        let bytecode_buf: Vec<_> = state_updates
+            .contracts
+            .iter()
+            .map(|(code_hash, bytecode)| (*code_hash, Some(Bytecode(bytecode.clone()))))
+            .collect();
 
         for (addr, account) in &state_updates.state {
             // If the account was not modified, as in not changed and not destroyed, then we have
@@ -380,6 +383,16 @@ impl ExecutionCache {
 
             // If the account was destroyed, invalidate from the account / storage caches
             if account.was_destroyed() {
+                // Invalidate the code cache entry for the old code hash before clearing the
+                // account cache, so that a selfdestruct+redeploy (EIP-6780) or a subsequent
+                // deployment at the same address with the same code hash does not hit stale
+                // bytecode.
+                if let Some(Some(old_account)) = self.account_cache.get(addr) {
+                    if let Some(code_hash) = old_account.bytecode_hash {
+                        self.code_cache.invalidate(&code_hash);
+                    }
+                }
+
                 // Invalidate the account cache entry if destroyed
                 self.account_cache.invalidate(addr);
 
@@ -391,7 +404,7 @@ impl ExecutionCache {
             // error has occurred because this state should be unrepresentable. An account with
             // `None` current info, should be destroyed.
             let Some(ref account_info) = account.info else {
-                trace!(target: "engine::caching", ?account, "Account with None account info found in state updates");
+                warn!(target: "engine::caching", ?account, "Account with None account info found in state updates");
                 return Err(())
             };
 
@@ -405,6 +418,11 @@ impl ExecutionCache {
             // Insert will update if present, so we just use the new account info as the new value
             // for the account cache
             self.account_cache.insert(*addr, Some(Account::from(account_info)));
+        }
+
+        // Phase 2 succeeded — now it is safe to flush the buffered bytecodes into the shared cache.
+        for (code_hash, bytecode) in bytecode_buf {
+            self.code_cache.insert(code_hash, bytecode);
         }
 
         Ok(())

@@ -238,8 +238,15 @@ where
     let mut removed_accounts = Vec::new();
 
     // Update account storage roots
+    let mut storage_error = None;
     for result in rx {
-        let (address, storage_trie) = result?;
+        let (address, storage_trie) = match result {
+            Ok(val) => val,
+            Err(e) => {
+                storage_error = Some(e);
+                break;
+            }
+        };
         trie.insert_storage_trie(address, storage_trie);
 
         if let Some(account) = state.accounts.remove(&address) {
@@ -262,19 +269,28 @@ where
         }
     }
 
-    // Update accounts
-    for (address, account) in state.accounts {
-        trace!(target: "engine::root::sparse", ?address, "Updating account");
-        if !trie.update_account(address, account.unwrap_or_default(), blinded_provider_factory)? {
-            removed_accounts.push(address);
+    // If a storage error occurred, skip further account updates but still remove any accounts
+    // that were already queued for removal before the error was encountered.
+    if storage_error.is_none() {
+        // Update accounts
+        for (address, account) in state.accounts {
+            trace!(target: "engine::root::sparse", ?address, "Updating account");
+            if !trie.update_account(address, account.unwrap_or_default(), blinded_provider_factory)? {
+                removed_accounts.push(address);
+            }
         }
     }
 
-    // Remove accounts
+    // Remove accounts — always run so that accounts queued before a storage error are not left
+    // as ghost leaf nodes in the recycled trie.
     for address in removed_accounts {
         trace!(target: "trie::sparse", ?address, "Removing account");
         let nibbles = Nibbles::unpack(address);
         trie.remove_account_leaf(&nibbles, blinded_provider_factory)?;
+    }
+
+    if let Some(e) = storage_error {
+        return Err(e);
     }
 
     let elapsed_before = started_at.elapsed();

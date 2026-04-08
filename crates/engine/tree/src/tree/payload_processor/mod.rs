@@ -570,7 +570,7 @@ impl ExecutionCache {
     /// - It exists and matches the requested parent hash
     /// - No other tasks are currently using it (checked via Arc reference count)
     pub(crate) fn get_cache_for(&self, parent_hash: B256) -> Option<SavedCache> {
-        let cache = self.inner.read();
+        let cache = self.inner.write();
         cache
             .as_ref()
             .filter(|c| c.executed_block_hash() == parent_hash && c.is_available())

@@ -38,7 +38,7 @@ use std::{
     },
     time::Instant,
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// A task that is responsible for caching and prewarming the cache by executing transactions
 /// individually in parallel.
@@ -103,9 +103,11 @@ where
         self.executor.spawn_blocking(move || {
             let mut handles = Vec::with_capacity(max_concurrency);
             let (done_tx, done_rx) = mpsc::channel();
-            let mut executing = 0;
+            let mut dispatch_idx = 0usize;
+            let mut executing = 0usize;
             while let Ok(executable) = pending.recv() {
-                let task_idx = executing % max_concurrency;
+                let task_idx = dispatch_idx % max_concurrency;
+                dispatch_idx += 1;
 
                 if handles.len() <= task_idx {
                     let (tx, rx) = mpsc::channel();
@@ -120,9 +122,9 @@ where
                     handles.push(tx);
                 }
 
-                let _ = handles[task_idx].send(executable);
-
-                executing += 1;
+                if handles[task_idx].send(executable).is_ok() {
+                    executing += 1;
+                }
             }
 
             // drop handle and wait for all tasks to finish and drop theirs
@@ -171,7 +173,7 @@ where
             if new_cache.cache().insert_state(&state).is_err() {
                 // Clear the cache on error to prevent having a polluted cache
                 *cached = None;
-                debug!(target: "engine::caching", "cleared execution cache on update error");
+                warn!(target: "engine::caching", "cleared execution cache on update error");
                 return;
             }
 
@@ -231,6 +233,17 @@ where
                     }
                 }
             }
+        }
+
+        if !finished_execution {
+            // The orchestrator task exited without sending FinishedTxExecution, which means it
+            // panicked or was dropped unexpectedly. Surface this as an error so it is not silently
+            // swallowed.
+            warn!(
+                target: "engine::tree::prewarm",
+                "Prewarm orchestrator exited unexpectedly without completing; \
+                 possible panic in spawn_blocking task"
+            );
         }
 
         trace!(target: "engine::tree::prewarm", "Completed prewarm execution");
