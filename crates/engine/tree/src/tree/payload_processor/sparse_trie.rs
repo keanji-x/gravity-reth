@@ -6,7 +6,7 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_trie::{updates::TrieUpdates, Nibbles};
 use reth_trie_parallel::root::ParallelStateRootError;
 use reth_trie_sparse::{
-    errors::{SparseStateTrieResult, SparseTrieErrorKind},
+    errors::{SparseStateTrieError, SparseStateTrieResult, SparseTrieErrorKind},
     provider::{TrieNodeProvider, TrieNodeProviderFactory},
     ClearedSparseStateTrie, SerialSparseTrie, SparseStateTrie, SparseTrieInterface,
 };
@@ -218,29 +218,59 @@ where
     // can't know the order that leaf operations happen in.
     let mut removed_accounts = Vec::new();
 
-    // Update account storage roots
+    // Update account storage roots.
+    // IMPORTANT: We must drain the entire channel before returning, even on error, to ensure
+    // every storage trie that was taken out of the main trie (via `take_storage_trie`) is
+    // re-inserted. An early return via `?` would leave the trie structurally incomplete, and
+    // that corrupted trie could then be recycled for the next block.
+    let mut storage_error: Option<SparseStateTrieError> = None;
     for result in rx {
-        let (address, storage_trie) = result?;
-        trie.insert_storage_trie(address, storage_trie);
-
-        if let Some(account) = state.accounts.remove(&address) {
-            // If the account itself has an update, remove it from the state update and update in
-            // one go instead of doing it down below.
-            trace!(target: "engine::root::sparse", ?address, "Updating account and its storage root");
-            if !trie.update_account(
-                address,
-                account.unwrap_or_default(),
-                blinded_provider_factory,
-            )? {
-                removed_accounts.push(address);
+        match result {
+            Err(e) if storage_error.is_none() => {
+                // Record the first error but keep draining so all tries are re-inserted.
+                storage_error = Some(e);
             }
-        } else if trie.is_account_revealed(address) {
-            // Otherwise, if the account is revealed, only update its storage root.
-            trace!(target: "engine::root::sparse", ?address, "Updating account storage root");
-            if !trie.update_account_storage_root(address, blinded_provider_factory)? {
-                removed_accounts.push(address);
+            Err(_) => {
+                // Subsequent errors are ignored; the trie for this address was never built,
+                // so there is nothing to re-insert. The first error is already recorded.
+            }
+            Ok((address, storage_trie)) => {
+                trie.insert_storage_trie(address, storage_trie);
+
+                // Only update account/storage-root entries when no error has occurred yet.
+                // If we are in an error state, skip the account updates — the caller will
+                // propagate the error and the trie will not be used for root computation.
+                if storage_error.is_none() {
+                    if let Some(account) = state.accounts.remove(&address) {
+                        // If the account itself has an update, remove it from the state update
+                        // and update in one go instead of doing it down below.
+                        trace!(target: "engine::root::sparse", ?address, "Updating account and its storage root");
+                        match trie.update_account(
+                            address,
+                            account.unwrap_or_default(),
+                            blinded_provider_factory,
+                        ) {
+                            Ok(false) => removed_accounts.push(address),
+                            Ok(true) => {}
+                            Err(e) if storage_error.is_none() => storage_error = Some(e),
+                            Err(_) => {}
+                        }
+                    } else if trie.is_account_revealed(address) {
+                        // Otherwise, if the account is revealed, only update its storage root.
+                        trace!(target: "engine::root::sparse", ?address, "Updating account storage root");
+                        match trie.update_account_storage_root(address, blinded_provider_factory) {
+                            Ok(false) => removed_accounts.push(address),
+                            Ok(true) => {}
+                            Err(e) if storage_error.is_none() => storage_error = Some(e),
+                            Err(_) => {}
+                        }
+                    }
+                }
             }
         }
+    }
+    if let Some(e) = storage_error {
+        return Err(e);
     }
 
     // Update accounts
