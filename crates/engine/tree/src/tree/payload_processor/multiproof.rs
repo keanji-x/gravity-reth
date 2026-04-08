@@ -1623,4 +1623,201 @@ mod tests {
         // only slots in the state update can be included, so slot3 should not appear
         assert!(!targets.contains_key(&addr));
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #215: ProofSequencer silently discards out-of-order / duplicate
+    // proofs, which can cause proofs_processed to diverge from the number of
+    // proofs actually delivered to the sparse trie.
+    // -------------------------------------------------------------------------
+
+    /// A proof whose sequence number is strictly below `next_to_deliver` must
+    /// be silently discarded — `add_proof` should return an empty vec and must
+    /// NOT advance `next_to_deliver`.
+    #[test]
+    fn test_add_proof_below_next_to_deliver_is_discarded() {
+        let mut sequencer = ProofSequencer::default();
+        sequencer.next_sequence = 3;
+
+        // Deliver seq 0 and seq 1 in-order so next_to_deliver advances to 2.
+        let r = sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 1, "seq 0 should be delivered immediately");
+        let r = sequencer.add_proof(1, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 1, "seq 1 should be delivered immediately");
+        assert_eq!(sequencer.next_to_deliver, 2, "next_to_deliver should be 2 after two deliveries");
+
+        // Now re-deliver seq 0 — this is the stale/duplicate that the issue describes.
+        let r = sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+
+        // The stale proof must be discarded: no update delivered, no state change.
+        assert_eq!(r.len(), 0, "stale proof (seq < next_to_deliver) must not trigger a delivery");
+        assert_eq!(sequencer.next_to_deliver, 2, "next_to_deliver must not regress after stale proof");
+        assert!(!sequencer.has_pending(), "pending queue must remain empty after stale proof");
+    }
+
+    /// Re-delivering seq 1 (already consumed) while seq 2 is still pending must
+    /// not trigger delivery of seq 2. Without the fix the stale proof at seq 1
+    /// could be inserted into pending_proofs, making seq 2 appear deliverable.
+    #[test]
+    fn test_stale_proof_does_not_unblock_pending_proof() {
+        let mut sequencer = ProofSequencer::default();
+        sequencer.next_sequence = 3;
+
+        // Deliver seq 0, advance next_to_deliver to 1.
+        sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(sequencer.next_to_deliver, 1);
+
+        // Buffer seq 2 out-of-order.
+        let r = sequencer.add_proof(2, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 0, "seq 2 cannot be delivered before seq 1");
+        assert!(sequencer.has_pending());
+
+        // Re-deliver seq 0 (stale). This must not create a gap-free run to seq 2.
+        let r = sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 0, "stale proof must not unlock pending proofs");
+        assert_eq!(sequencer.next_to_deliver, 1, "next_to_deliver unchanged");
+        // seq 2 must still be pending.
+        assert!(sequencer.has_pending(), "seq 2 must still be buffered");
+    }
+
+    /// `is_done()` uses `proofs_processed >= total_requested`. If a stale
+    /// duplicate increments `proofs_processed` at the call site (lines 1004 /
+    /// 1032) while `add_proof` discards it, `is_done()` can return `true` even
+    /// though `has_pending()` is true — the `&&` with `no_pending` saves us
+    /// today, but only as long as pending_proofs is not empty.  This test
+    /// verifies that an over-counted `proofs_processed` is correctly rejected
+    /// by `is_done()` when there are still pending proofs.
+    #[test]
+    fn test_is_done_not_true_when_pending_proofs_remain() {
+        let test_provider_factory = create_test_provider_factory();
+        let mut task = create_test_state_root_task(test_provider_factory);
+
+        // Simulate: 2 proofs requested, 1 delivered in-order, 1 still buffered
+        // out-of-order, and proofs_processed has been over-incremented to 2.
+        task.proof_sequencer.next_sequence = 2;
+
+        // Buffer seq 1 (out-of-order, seq 0 not yet delivered).
+        task.proof_sequencer.add_proof(1, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert!(task.proof_sequencer.has_pending());
+
+        // proofs_processed is 2 (over-counted due to the duplicate delivery bug).
+        let proofs_processed: u64 = 2;
+        let state_update_proofs_requested: u64 = 2;
+        let prefetch_proofs_requested: u64 = 0;
+        let updates_finished = true;
+
+        // Even though proofs_processed >= total_requested, is_done must return
+        // false because there are still entries in pending_proofs.
+        assert!(
+            !task.is_done(proofs_processed, state_update_proofs_requested, prefetch_proofs_requested, updates_finished),
+            "is_done must be false while pending_proofs is non-empty"
+        );
+    }
+
+    /// After delivering a duplicate sequence number (seq 0 delivered twice),
+    /// the second delivery must not leave a stale entry in `pending_proofs`.
+    /// Specifically: the first delivery moves seq 0 out of pending, and the
+    /// second delivery (which arrives after next_to_deliver has advanced past 0)
+    /// must be silently dropped without re-inserting into pending_proofs.
+    #[test]
+    fn test_post_delivery_duplicate_does_not_corrupt_pending_queue() {
+        let mut sequencer = ProofSequencer::default();
+        sequencer.next_sequence = 2;
+
+        // Deliver seq 0, then seq 1 — all proofs consumed.
+        let r = sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 1);
+        let r = sequencer.add_proof(1, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(r.len(), 1);
+        assert!(!sequencer.has_pending(), "all proofs delivered, queue must be empty");
+        assert_eq!(sequencer.next_to_deliver, 2);
+
+        // Re-deliver seq 0 (stale duplicate — the double-spawn scenario).
+        sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+
+        // The queue must still be empty; the stale proof must NOT appear in pending_proofs.
+        assert!(
+            !sequencer.has_pending(),
+            "stale duplicate must not re-insert into pending_proofs"
+        );
+    }
+
+    /// THE CORE BUG REGRESSION TEST (Issue #215).
+    ///
+    /// Scenario: 2 proofs are requested (seq 0 and seq 1).
+    ///
+    /// 1. `ProofCalculated(seq=0)` arrives →  call site increments `proofs_processed` to 1,
+    ///    then `on_proof(0, …)` / `add_proof(0, …)` delivers it; `next_to_deliver` → 1.
+    ///
+    /// 2. Duplicate `ProofCalculated(seq=0)` arrives (e.g. re-queued task) →
+    ///    call site **unconditionally** increments `proofs_processed` to 2 **before**
+    ///    calling `on_proof`.  Inside `add_proof`, `sequence (0) < next_to_deliver (1)`,
+    ///    so the proof is silently discarded and `pending_proofs` stays empty.
+    ///
+    /// 3. `ProofCalculated(seq=1)` NEVER arrives.
+    ///    `pending_proofs` is empty (seq 1 was never buffered).
+    ///
+    /// 4. `FinishedStateUpdates` arrives → `is_done(proofs_processed=2, total=2,
+    ///    updates_finished=true)` is evaluated.
+    ///    - `all_proofs_processed = 2 >= 2`  → **true**
+    ///    - `no_pending       = !has_pending()` → **true** (nothing buffered)
+    ///    - Result: `is_done()` returns **true** → premature exit; the update for
+    ///      seq 1 is permanently lost.
+    ///
+    /// This test asserts that `is_done()` must return **false** in this situation.
+    /// On current (unfixed) code the assertion fails, demonstrating the bug.
+    #[test]
+    fn test_is_done_premature_exit_on_duplicate_proof_with_missing_seq() {
+        let test_provider_factory = create_test_provider_factory();
+        let mut task = create_test_state_root_task(test_provider_factory);
+
+        // Two proofs allocated: seq 0 and seq 1.
+        task.proof_sequencer.next_sequence = 2;
+
+        // --- Step 1: seq 0 arrives normally. ---
+        // This mirrors what `on_proof(0, …)` does inside `run()`.
+        let delivered =
+            task.proof_sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(delivered.len(), 1, "seq 0 must be delivered on first arrival");
+        assert_eq!(task.proof_sequencer.next_to_deliver, 1, "next_to_deliver must advance to 1");
+        // proofs_processed would now be 1 (incremented once at the call site).
+
+        // --- Step 2: duplicate ProofCalculated(seq=0) arrives. ---
+        // The call site at line 1032 increments proofs_processed BEFORE calling on_proof,
+        // so proofs_processed is now 2.  add_proof discards the duplicate silently.
+        let duplicate_delivered =
+            task.proof_sequencer.add_proof(0, SparseTrieUpdate::from_multiproof(MultiProof::default()).unwrap());
+        assert_eq!(duplicate_delivered.len(), 0, "duplicate seq 0 must be discarded by add_proof");
+
+        // --- Step 3: seq 1 never arrives. ---
+        // Verify the exact state that causes the premature-exit bug:
+        // pending_proofs is empty (seq 1 was never buffered), yet next_to_deliver is only 1.
+        assert!(
+            !task.proof_sequencer.has_pending(),
+            "pending_proofs must be empty: seq 1 never arrived, duplicate was discarded"
+        );
+        assert_eq!(
+            task.proof_sequencer.next_to_deliver, 1,
+            "next_to_deliver must still be 1: seq 1 was never actually delivered"
+        );
+
+        // --- Step 4: is_done() is evaluated with the overcounted proofs_processed. ---
+        // proofs_processed = 2 (overcounted), total_requested = 2, updates_finished = true.
+        //
+        // On current buggy code:
+        //   all_proofs_processed = 2 >= 2  → true
+        //   no_pending           = !false  → true  (nothing in pending_proofs)
+        //   updates_finished               → true
+        //   ⇒ is_done() returns true  — WRONG: seq 1 update was never sent to sparse trie.
+        //
+        // A correct implementation must detect that next_to_deliver (1) < next_sequence (2),
+        // meaning not all allocated proofs were actually delivered, and return false.
+        assert!(
+            !task.is_done(2, 2, 0, true),
+            "is_done() must return false when proofs_processed was overcounted by a \
+             duplicate ProofCalculated and the corresponding real proof (seq 1) never arrived: \
+             next_to_deliver ({}) < next_sequence ({})",
+            task.proof_sequencer.next_to_deliver,
+            task.proof_sequencer.next_sequence,
+        );
+    }
 }
