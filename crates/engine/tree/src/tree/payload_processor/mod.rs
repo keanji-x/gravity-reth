@@ -20,12 +20,12 @@ use multiproof::{SparseTrieUpdate, *};
 use parking_lot::RwLock;
 use prewarm::PrewarmMetrics;
 use reth_engine_primitives::ExecutableTxIterator;
+use reth_errors::ProviderError;
 use reth_evm::{
     execute::{ExecutableTxFor, WithTxEnv},
     ConfigureEvm, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
 };
 use reth_primitives_traits::NodePrimitives;
-use reth_errors::ProviderError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DatabaseProviderFactory, StateProviderFactory,
     StateReader,
@@ -46,6 +46,7 @@ use std::sync::{
     mpsc::{self, channel, Sender},
     Arc,
 };
+use tokio::task::JoinHandle;
 use tracing::{debug, instrument};
 
 mod configured_sparse_trie;
@@ -181,8 +182,7 @@ where
             + Clone
             + 'static,
     {
-        let (to_sparse_trie, sparse_trie_rx) =
-            channel::<Result<SparseTrieUpdate, ProviderError>>();
+        let (to_sparse_trie, sparse_trie_rx) = channel::<Result<SparseTrieUpdate, ProviderError>>();
         // spawn multiproof task, save the trie input
         let (trie_input, state_root_config) =
             MultiProofConfig::new_from_input(consistent_view, trie_input);
@@ -221,8 +221,9 @@ where
         let prewarm_handle =
             self.spawn_caching_with(env, prewarm_rx, provider_builder, to_multi_proof.clone());
 
-        // spawn multi-proof task
-        self.executor.spawn_blocking(move || {
+        // spawn multi-proof task; retain the handle so panics are observable and the task can be
+        // aborted when the PayloadHandle is dropped.
+        let multi_proof_task_handle = self.executor.spawn_blocking(move || {
             multi_proof_task.run();
         });
 
@@ -232,8 +233,8 @@ where
         // Spawn the sparse trie task using any stored trie and parallel trie configuration.
         self.spawn_sparse_trie_task(sparse_trie_rx, proof_task.handle(), state_root_tx);
 
-        // spawn the proof task
-        self.executor.spawn_blocking(move || {
+        // spawn the proof task; retain the handle for the same reasons as above.
+        let proof_task_handle = self.executor.spawn_blocking(move || {
             if let Err(err) = proof_task.run() {
                 // At least log if there is an error at any point
                 tracing::error!(
@@ -249,6 +250,8 @@ where
             prewarm_handle,
             state_root: Some(state_root_rx),
             transactions: execution_rx,
+            multi_proof_task_handle: Some(multi_proof_task_handle),
+            proof_task_handle: Some(proof_task_handle),
         }
     }
 
@@ -271,6 +274,8 @@ where
             prewarm_handle,
             state_root: None,
             transactions: execution_rx,
+            multi_proof_task_handle: None,
+            proof_task_handle: None,
         }
     }
 
@@ -432,6 +437,15 @@ pub struct PayloadHandle<Tx, Err> {
     state_root: Option<mpsc::Receiver<Result<StateRootComputeOutcome, ParallelStateRootError>>>,
     /// Stream of block transactions
     transactions: mpsc::Receiver<Result<Tx, Err>>,
+    /// JoinHandle for the multi-proof orchestrator task.
+    ///
+    /// Kept alive so that a panic or early exit is observable and the task can be
+    /// aborted when this handle is dropped.
+    multi_proof_task_handle: Option<JoinHandle<()>>,
+    /// JoinHandle for the proof-task orchestrator.
+    ///
+    /// Same rationale as `multi_proof_task_handle`.
+    proof_task_handle: Option<JoinHandle<()>>,
 }
 
 impl<Tx, Err> PayloadHandle<Tx, Err> {
@@ -491,6 +505,20 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
         core::iter::repeat_with(|| self.transactions.recv())
             .take_while(|res| res.is_ok())
             .map(|res| res.unwrap())
+    }
+}
+
+impl<Tx, Err> Drop for PayloadHandle<Tx, Err> {
+    fn drop(&mut self) {
+        // Abort the orchestrator tasks to avoid leaving them running detached.  Without this,
+        // a dropped handle would silently detach the tokio blocking tasks: panics would be
+        // swallowed and there would be no way to cancel in-flight work.
+        if let Some(handle) = self.multi_proof_task_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.proof_task_handle.take() {
+            handle.abort();
+        }
     }
 }
 
