@@ -121,6 +121,157 @@ mod tests {
     use alloy_primitives::{b256, hex};
     use reth_ethereum_primitives::Receipt;
 
+    // ── Issue #251 regression tests ──────────────────────────────────────────
+    //
+    // `validate_block_post_execution` uses
+    //   `receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0)`
+    // to obtain the cumulative gas used.  When `receipts` is empty the
+    // sentinel `0` is returned.  If the block header also declares
+    // `gas_used = 0` the gas check passes silently even though transactions
+    // are present in the block body.
+    //
+    // All three tests below FAIL (i.e. the assertion fires) while the bug
+    // exists, and will pass once an explicit transaction/receipt count guard
+    // is added.
+
+    fn make_recovered_block_with_one_tx(
+        header: alloy_consensus::Header,
+    ) -> reth_primitives_traits::RecoveredBlock<reth_ethereum_primitives::Block> {
+        use alloy_consensus::{BlockBody, SignableTransaction, TxLegacy};
+        use alloy_primitives::{Address, Signature, U256};
+        use reth_primitives_traits::RecoveredBlock;
+
+        // Construct a signed transaction with a dummy (non-recoverable) signature.
+        // We use `new_unhashed` below so actual sender recovery is never attempted.
+        let tx: reth_ethereum_primitives::TransactionSigned =
+            TxLegacy::default().into_signed(Signature::new(U256::ONE, U256::ONE, false)).into();
+
+        let body: alloy_consensus::BlockBody<reth_ethereum_primitives::TransactionSigned> =
+            BlockBody { transactions: vec![tx], ..Default::default() };
+
+        let block = reth_ethereum_primitives::Block { header, body };
+
+        // Provide a dummy sender; bypass signature recovery entirely.
+        RecoveredBlock::new_unhashed(block, vec![Address::ZERO])
+    }
+
+    /// Pre-Byzantium path (block number 0 on mainnet): only the gas check runs.
+    /// Empty receipts + gas_used = 0 in the header should be rejected because
+    /// the block body contains a transaction.
+    #[test]
+    fn test_validate_block_post_execution_empty_receipts_pre_byzantium() {
+        use alloy_consensus::EMPTY_ROOT_HASH;
+        use alloy_eips::eip7685::Requests;
+        use reth_chainspec::MAINNET;
+
+        let header = alloy_consensus::Header {
+            number: 0,
+            gas_used: 0,
+            receipts_root: EMPTY_ROOT_HASH,
+            ..Default::default()
+        };
+        let recovered = make_recovered_block_with_one_tx(header);
+
+        let receipts: Vec<Receipt> = vec![];
+        let requests = Requests::default();
+
+        // `receipts.last()` is None → sentinel 0 is used → matches gas_used = 0 in
+        // header → gas check passes despite 1 unexecuted transaction.
+        //
+        // This assertion FAILS while the bug is present.
+        let result = validate_block_post_execution(&recovered, &*MAINNET, &receipts, &requests);
+        assert!(
+            result.is_err(),
+            "Expected error when transactions are present but receipts is empty (pre-Byzantium); \
+             got Ok(())"
+        );
+    }
+
+    /// Post-Byzantium path: both the gas check *and* the receipts-root /
+    /// logs-bloom check run.  Setting the header's `receipts_root` to
+    /// `EMPTY_ROOT_HASH` and `logs_bloom` to `Bloom::ZERO` makes
+    /// `verify_receipts` also pass for an empty slice, completing the silent
+    /// bypass across both checks.
+    #[test]
+    fn test_validate_block_post_execution_empty_receipts_post_byzantium() {
+        use alloy_consensus::EMPTY_ROOT_HASH;
+        use alloy_eips::eip7685::Requests;
+        use alloy_primitives::Bloom;
+        use reth_chainspec::MAINNET;
+
+        // Mainnet Byzantium activates at block 4_370_000; use a block safely
+        // above that threshold.
+        let header = alloy_consensus::Header {
+            number: 5_000_000,
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            receipts_root: EMPTY_ROOT_HASH, // matches an empty receipts slice
+            logs_bloom: Bloom::ZERO,        // matches an empty receipts slice
+            ..Default::default()
+        };
+        let recovered = make_recovered_block_with_one_tx(header);
+
+        let receipts: Vec<Receipt> = vec![];
+        let requests = Requests::default();
+
+        // Both the gas check and the Byzantium receipts-root check pass because
+        // the header fields are consistent with *zero* receipts, not one.
+        //
+        // This assertion FAILS while the bug is present.
+        let result = validate_block_post_execution(&recovered, &*MAINNET, &receipts, &requests);
+        assert!(
+            result.is_err(),
+            "Expected error when transactions are present but receipts is empty (post-Byzantium); \
+             got Ok(())"
+        );
+    }
+
+    /// Directly documents the sentinel value path that causes the bypass:
+    /// `receipts.last().map(…).unwrap_or(0)` returns `0` for an empty slice.
+    /// Combined with `gas_used = 0` in the header this makes the gas check a
+    /// no-op, which the subsequent assertions confirm.
+    #[test]
+    fn test_validate_block_post_execution_gas_sentinel_bypass() {
+        use alloy_consensus::EMPTY_ROOT_HASH;
+        use alloy_eips::eip7685::Requests;
+        use reth_chainspec::MAINNET;
+
+        let header = alloy_consensus::Header {
+            number: 0,
+            gas_used: 0,
+            receipts_root: EMPTY_ROOT_HASH,
+            ..Default::default()
+        };
+        let recovered = make_recovered_block_with_one_tx(header);
+
+        let receipts: Vec<Receipt> = vec![];
+
+        // Show that the sentinel exactly equals gas_used, masking the missing
+        // receipt.
+        let sentinel = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
+        assert_eq!(sentinel, 0, "sentinel for empty receipts is 0");
+        assert_eq!(recovered.header().gas_used(), 0, "header declares gas_used = 0");
+        assert_eq!(
+            sentinel,
+            recovered.header().gas_used(),
+            "sentinel matches gas_used — gas check will not fire"
+        );
+        assert_eq!(
+            recovered.body().transactions().count(),
+            1,
+            "block body has 1 transaction that produced no receipt"
+        );
+
+        // The function incorrectly returns Ok(()).
+        // This assertion FAILS while the bug is present.
+        let result =
+            validate_block_post_execution(&recovered, &*MAINNET, &receipts, &Requests::default());
+        assert!(
+            result.is_err(),
+            "Expected validation error for 1 transaction / 0 receipts; got Ok(())"
+        );
+    }
+
     #[test]
     fn test_verify_receipts_success() {
         // Create a vector of 5 default Receipt instances
