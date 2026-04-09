@@ -8766,6 +8766,7 @@ dependencies = [
  "reth-storage-errors",
  "reth-testing-utils",
  "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
  "secp256k1 0.30.0",
 ]
 
