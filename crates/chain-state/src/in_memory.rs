@@ -1513,6 +1513,203 @@ mod tests {
         assert_eq!(block_state_chain[0].block().recovered_block().number, 1);
     }
 
+    /// Tests that `remove_persisted_blocks` is a no-op when the supplied hash is no longer
+    /// in the canonical in-memory map because a reorg already removed it.  This validates the
+    /// early-return guard at line ~322 when called in strict sequential order (no concurrency).
+    #[test]
+    fn test_remove_persisted_blocks_noop_when_hash_reorged_before_call() {
+        let mut builder = TestBlockBuilder::eth();
+
+        // Old fork: blocks 100, 101, 102 on the initial canonical chain.
+        let old_100 = builder.get_executed_block_with_number(100, B256::random());
+        let old_101 =
+            builder.get_executed_block_with_number(101, old_100.recovered_block().hash());
+        let old_102 =
+            builder.get_executed_block_with_number(102, old_101.recovered_block().hash());
+
+        // New fork: blocks 100, 101 on a different branch (the reorg target).
+        let new_100 = builder.get_executed_block_with_number(100, B256::random());
+        let new_101 =
+            builder.get_executed_block_with_number(101, new_100.recovered_block().hash());
+
+        let old_100_hash = old_100.recovered_block().hash();
+        let new_100_hash = new_100.recovered_block().hash();
+        let new_101_hash = new_101.recovered_block().hash();
+
+        // Commit old fork as canonical.
+        let state = CanonicalInMemoryState::empty();
+        state.update_chain(NewCanonicalChain::Commit {
+            new: vec![old_100.clone(), old_101.clone(), old_102.clone()],
+        });
+
+        // Reorg: new fork becomes canonical; old blocks are evicted from in-memory state.
+        state.update_chain(NewCanonicalChain::Reorg {
+            new: vec![new_100.clone(), new_101.clone()],
+            old: vec![old_100.block.clone(), old_101.block.clone(), old_102.block.clone()],
+        });
+
+        // Verify new fork is canonical before calling remove_persisted_blocks.
+        assert_eq!(
+            state.state_by_number(100).map(|s| s.hash()),
+            Some(new_100_hash),
+            "H_new_100 must be canonical after reorg"
+        );
+        assert_eq!(
+            state.state_by_number(101).map(|s| s.hash()),
+            Some(new_101_hash),
+            "H_new_101 must be canonical after reorg"
+        );
+
+        // Call remove_persisted_blocks with the OLD (now non-canonical) hash.
+        // Since old_100_hash is no longer in the map, this must be a no-op.
+        state.remove_persisted_blocks(BlockNumHash { number: 100, hash: old_100_hash });
+
+        // New canonical chain must be completely intact.
+        assert_eq!(
+            state.state_by_number(100).map(|s| s.hash()),
+            Some(new_100_hash),
+            "H_new_100 must still be present after no-op remove_persisted_blocks"
+        );
+        assert_eq!(
+            state.state_by_number(101).map(|s| s.hash()),
+            Some(new_101_hash),
+            "H_new_101 must still be present after no-op remove_persisted_blocks"
+        );
+
+        // H_new_101's parent chain must include H_new_100.
+        let block_101 = state.state_by_hash(new_101_hash).unwrap();
+        let chain_len = block_101.chain().count();
+        assert_eq!(
+            chain_len, 2,
+            "H_new_101's chain must have 2 elements (itself + H_new_100); got {}",
+            chain_len
+        );
+    }
+
+    /// Stress-tests the TOCTOU race between `remove_persisted_blocks` and
+    /// `update_chain(Reorg)`.
+    ///
+    /// # Bug Summary (issue #252)
+    ///
+    /// `remove_persisted_blocks` checks if the persisted hash exists **under a read lock**,
+    /// releases that lock, then acquires **write locks**.  A concurrent reorg can replace the
+    /// canonical maps in the window between the two lock acquisitions:
+    ///
+    /// 1. State: `{H_old_100, H_old_101, H_old_102}`
+    /// 2. Thread A: `remove_persisted_blocks(H_old_100)` — passes existence check (read lock).
+    /// 3. Thread B: `update_chain(Reorg{new:[H_new_100,H_new_101], old:[…]})` — maps are now
+    ///    `{H_new_100, H_new_101}`.
+    /// 4. Thread A acquires write locks, drains **all** blocks (including H_new_100,H_new_101),
+    ///    filters by `number > 100` (drops H_new_100), re-inserts only H_new_101 with
+    ///    `parent = None`.
+    ///
+    /// Result: H_new_100 is permanently gone; H_new_101's parent chain is severed.
+    ///
+    /// # Invariant
+    ///
+    /// After both operations complete: if H_new_101 is reachable, H_new_100 **must** also be
+    /// reachable and be its ancestor.
+    #[test]
+    fn test_toctou_race_remove_persisted_blocks_concurrent_reorg() {
+        use std::sync::Barrier;
+
+        // Run many iterations to maximise the probability of hitting the TOCTOU window.
+        let iterations = 500;
+
+        for iteration in 0..iterations {
+            let mut builder = TestBlockBuilder::eth();
+
+            // Old fork: 3 blocks on the current canonical chain.
+            let old_100 = builder.get_executed_block_with_number(100, B256::random());
+            let old_101 =
+                builder.get_executed_block_with_number(101, old_100.recovered_block().hash());
+            let old_102 =
+                builder.get_executed_block_with_number(102, old_101.recovered_block().hash());
+
+            // New fork: 2 blocks on a different branch (the reorg target).
+            let new_100 = builder.get_executed_block_with_number(100, B256::random());
+            let new_101 =
+                builder.get_executed_block_with_number(101, new_100.recovered_block().hash());
+
+            let old_100_num_hash =
+                BlockNumHash { number: 100, hash: old_100.recovered_block().hash() };
+            let new_100_hash = new_100.recovered_block().hash();
+            let new_101_hash = new_101.recovered_block().hash();
+
+            // Initialize in-memory state with the old fork as canonical.
+            let state = Arc::new(CanonicalInMemoryState::empty());
+            state.update_chain(NewCanonicalChain::Commit {
+                new: vec![old_100.clone(), old_101.clone(), old_102.clone()],
+            });
+
+            // Barrier to start both threads as simultaneously as possible, maximising
+            // the chance of hitting the TOCTOU window between the read-lock check and
+            // the write-lock mutation inside remove_persisted_blocks.
+            let barrier = Arc::new(Barrier::new(2));
+
+            // Thread A: persistence task — notifies that block 100 (old fork) was persisted.
+            let state_a = Arc::clone(&state);
+            let barrier_a = Arc::clone(&barrier);
+            let handle_a = std::thread::spawn(move || {
+                barrier_a.wait();
+                state_a.remove_persisted_blocks(old_100_num_hash);
+            });
+
+            // Thread B: engine task — applies a reorg that replaces the old fork.
+            let state_b = Arc::clone(&state);
+            let barrier_b = Arc::clone(&barrier);
+            let new_100_b = new_100.clone();
+            let new_101_b = new_101.clone();
+            let old_100_block = old_100.block.clone();
+            let old_101_block = old_101.block.clone();
+            let old_102_block = old_102.block.clone();
+            let handle_b = std::thread::spawn(move || {
+                barrier_b.wait();
+                state_b.update_chain(NewCanonicalChain::Reorg {
+                    new: vec![new_100_b, new_101_b],
+                    old: vec![old_100_block, old_101_block, old_102_block],
+                });
+            });
+
+            handle_a.join().unwrap();
+            handle_b.join().unwrap();
+
+            // --- Invariant ---
+            // If H_new_101 is present in state (the new fork won), H_new_100 MUST also be
+            // present and be an ancestor of H_new_101.
+            //
+            // A violation (chain().count() == 1 and state_by_number(100) == None) means
+            // the TOCTOU race fired: remove_persisted_blocks read H_old_100 as present,
+            // the reorg swapped in H_new_100/H_new_101, then remove_persisted_blocks
+            // drained and discarded H_new_100 (number <= 100), leaving H_new_101 in memory
+            // with parent=None and permanently corrupting the canonical chain.
+            if let Some(block_101_state) = state.state_by_hash(new_101_hash) {
+                let chain_len = block_101_state.chain().count();
+
+                assert!(
+                    chain_len >= 2,
+                    "iteration {}: TOCTOU race corrupted canonical chain — H_new_101 is \
+                     present but its parent H_new_100 was discarded by remove_persisted_blocks. \
+                     chain().count()={} (expected >=2). \
+                     state_by_number(100)={:?}, state_by_hash(new_100)={:?}",
+                    iteration,
+                    chain_len,
+                    state.state_by_number(100).map(|s| s.hash()),
+                    state.state_by_hash(new_100_hash).map(|s| s.hash()),
+                );
+
+                assert_eq!(
+                    state.state_by_number(100).map(|s| s.hash()),
+                    Some(new_100_hash),
+                    "iteration {}: H_new_100 must be reachable by number after reorg; \
+                     chain().count()={}",
+                    iteration,
+                    chain_len,
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_to_chain_notification() {
         // Generate 4 blocks
