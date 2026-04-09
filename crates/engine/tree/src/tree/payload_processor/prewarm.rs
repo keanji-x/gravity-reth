@@ -75,6 +75,7 @@ where
         execution_cache: PayloadExecutionCache,
         ctx: PrewarmContext<N, P, Evm>,
         to_multi_proof: Option<Sender<MultiProofMessage>>,
+        max_concurrency: usize,
     ) -> (Self, Sender<PrewarmTaskEvent>) {
         let (actions_tx, actions_rx) = channel();
         (
@@ -82,7 +83,7 @@ where
                 executor,
                 execution_cache,
                 ctx,
-                max_concurrency: 64,
+                max_concurrency,
                 to_multi_proof,
                 actions_rx,
             },
@@ -497,43 +498,36 @@ mod tests {
         }
     }
 
-    /// Issue #216: `PrewarmCacheTask::new` hardcodes `max_concurrency` to 64.
+    /// Issue #216: `PrewarmCacheTask::new` previously hardcoded `max_concurrency` to 64.
     ///
-    /// This test documents the **current buggy behaviour**: the field is always 64
-    /// regardless of any external configuration.  Once the fix is applied
-    /// (`TreeConfig::max_prewarm_task_concurrency()` wired through
-    /// `PayloadProcessor::spawn_caching_with` into `PrewarmCacheTask::new`), the
-    /// value will no longer be 64 by default, and this test should be updated to
-    /// assert the configured default value instead.
+    /// After the fix, `new()` accepts a `max_concurrency` parameter and stores it directly.
+    /// This test verifies that the supplied value is honoured.
     #[test]
-    fn test_prewarm_cache_task_new_hardcodes_max_concurrency_to_64() {
+    fn test_prewarm_cache_task_new_honours_configured_max_concurrency() {
+        use reth_engine_primitives::config::DEFAULT_MAX_PREWARM_TASK_CONCURRENCY;
+
         let (task, _tx) = PrewarmCacheTask::new(
             WorkloadExecutor::default(),
             PayloadExecutionCache::default(),
             make_prewarm_context(),
             None,
+            DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
         );
 
-        // Asserts the hardcoded value that should be replaced by a config-driven one.
         assert_eq!(
             task.max_concurrency,
-            64,
-            "Issue #216: PrewarmCacheTask::new hardcodes max_concurrency to 64; \
-             it should read the value from TreeConfig"
+            DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
+            "Issue #216 fixed: PrewarmCacheTask::new must store the supplied max_concurrency"
         );
     }
 
-    /// Issue #216: `max_concurrency` should **not** be a magic constant.
+    /// Issue #216: `max_concurrency` is not a magic constant — the caller supplies it.
     ///
-    /// This test asserts the *expected* post-fix behaviour: after the fix, a caller
-    /// should be able to supply a concurrency limit (e.g. `num_cpus / 2`) and the
-    /// constructed task must honour it.  Because `new()` currently ignores any
-    /// such parameter and unconditionally writes 64, **this test FAILS** until the
-    /// fix is applied.
+    /// After the fix, `new()` accepts a `max_concurrency` parameter; a caller can supply
+    /// any value (e.g. `num_cpus / 2` derived from `TreeConfig`) and the constructed task
+    /// must store it exactly.
     #[test]
-    fn test_prewarm_max_concurrency_should_not_be_hardcoded() {
-        // Represents the configurable value a fixed version would accept.
-        // After the fix: `PrewarmCacheTask::new` should take this from TreeConfig.
+    fn test_prewarm_max_concurrency_is_caller_supplied() {
         let configured_concurrency: usize = 32;
 
         let (task, _tx) = PrewarmCacheTask::new(
@@ -541,15 +535,13 @@ mod tests {
             PayloadExecutionCache::default(),
             make_prewarm_context(),
             None,
+            configured_concurrency,
         );
 
-        // FAILS with the current code because new() always sets max_concurrency = 64.
-        // After the fix this assertion should pass when the config supplies 32.
         assert_eq!(
             task.max_concurrency,
             configured_concurrency,
-            "Issue #216: expected max_concurrency={configured_concurrency} from config, \
-             but PrewarmCacheTask::new hardcodes it to 64"
+            "Issue #216 fixed: new() must store the caller-supplied max_concurrency"
         );
     }
 
@@ -681,22 +673,19 @@ mod issue_216 {
             "direct construction must store the supplied value"
         );
 
-        // Construct through the public API that the fix must update.
+        // Construct through the public API with the same desired concurrency.
         let (task_via_new, _sender) = PrewarmCacheTask::new(
             WorkloadExecutor::default(),
             PayloadExecutionCache::default(),
             make_ctx(),
             None,
+            desired_max_concurrency,
         );
 
-        // FAILS now (64 != 32).  After the fix, new() accepts the configured value and
-        // stores it, making both sides equal.  No rewrite of this test is needed once the
-        // fix is applied — the assertion becomes correct automatically.
         assert_eq!(
             task_via_new.max_concurrency,
             directly_configured.max_concurrency,
-            "Issue #216: PrewarmCacheTask::new must honour the operator-configured \
-             max_concurrency ({}), but currently hardcodes 64",
+            "Issue #216 fixed: PrewarmCacheTask::new must store the supplied max_concurrency ({})",
             desired_max_concurrency,
         );
     }
@@ -713,23 +702,26 @@ mod issue_216 {
     /// both reading the same `TreeConfig` will also agree — the invariant holds either way.
     #[test]
     fn test_new_always_produces_same_fixed_value_regardless_of_context() {
+        use reth_engine_primitives::config::DEFAULT_MAX_PREWARM_TASK_CONCURRENCY;
+
         let (task_a, _) = PrewarmCacheTask::new(
             WorkloadExecutor::default(),
             PayloadExecutionCache::default(),
             make_ctx(),
             None,
+            DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
         );
         let (task_b, _) = PrewarmCacheTask::new(
             WorkloadExecutor::default(),
             PayloadExecutionCache::default(),
             make_ctx(),
             None,
+            DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
         );
 
         assert_eq!(
             task_a.max_concurrency, task_b.max_concurrency,
-            "Issue #216: new() always produces the same hardcoded max_concurrency; \
-             there is currently no code path that supplies a different value from TreeConfig"
+            "two tasks constructed with the same concurrency value must agree"
         );
         assert!(
             task_a.max_concurrency > 0,

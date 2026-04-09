@@ -83,6 +83,8 @@ where
     evm_config: Evm,
     /// Whether precompile cache should be disabled.
     precompile_cache_disabled: bool,
+    /// Maximum number of concurrent prewarm workers per block.
+    max_prewarm_concurrency: usize,
     /// Precompile cache map.
     precompile_cache_map: PrecompileCacheMap<SpecFor<Evm>>,
     /// A cleared `SparseStateTrie`, kept around to be reused for the state root computation so
@@ -118,6 +120,7 @@ where
             disable_transaction_prewarming: config.disable_caching_and_prewarming(),
             evm_config,
             precompile_cache_disabled: config.precompile_cache_disabled(),
+            max_prewarm_concurrency: config.max_prewarm_task_concurrency(),
             precompile_cache_map,
             sparse_state_trie: Arc::default(),
             trie_input: None,
@@ -334,6 +337,7 @@ where
             self.execution_cache.clone(),
             prewarm_ctx,
             to_multi_proof,
+            self.max_prewarm_concurrency,
         );
 
         // spawn pre-warm task

@@ -14,6 +14,12 @@ pub const DEFAULT_MAX_PROOF_TASK_CONCURRENCY: u64 = 256;
 /// This will be deducted from the thread count of main reth global threadpool.
 pub const DEFAULT_RESERVED_CPU_CORES: usize = 1;
 
+/// Default maximum concurrency for prewarm tasks.
+///
+/// Each block validation spawns up to this many `spawn_blocking` workers for prewarming.
+/// Keeping this below the full proof-task concurrency avoids saturating the blocking thread pool.
+pub const DEFAULT_MAX_PREWARM_TASK_CONCURRENCY: usize = 32;
+
 const DEFAULT_BLOCK_BUFFER_LIMIT: u32 = 256;
 const DEFAULT_MAX_INVALID_HEADER_CACHE_LENGTH: u32 = 256;
 const DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE: usize = 4;
@@ -97,6 +103,8 @@ pub struct TreeConfig {
     always_process_payload_attributes_on_canonical_head: bool,
     /// Whether to unwind canonical header to ancestor during forkchoice updates.
     allow_unwind_canonical_header: bool,
+    /// Maximum number of concurrent prewarm tasks per block.
+    max_prewarm_task_concurrency: usize,
 }
 
 impl Default for TreeConfig {
@@ -120,6 +128,7 @@ impl Default for TreeConfig {
             state_root_fallback: false,
             always_process_payload_attributes_on_canonical_head: false,
             allow_unwind_canonical_header: false,
+            max_prewarm_task_concurrency: DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
         }
     }
 }
@@ -166,6 +175,7 @@ impl TreeConfig {
             state_root_fallback,
             always_process_payload_attributes_on_canonical_head,
             allow_unwind_canonical_header,
+            max_prewarm_task_concurrency: DEFAULT_MAX_PREWARM_TASK_CONCURRENCY,
         }
     }
 
@@ -388,6 +398,20 @@ impl TreeConfig {
     /// Setter for whether to unwind canonical header to ancestor during forkchoice updates.
     pub const fn with_unwind_canonical_header(mut self, unwind_canonical_header: bool) -> Self {
         self.allow_unwind_canonical_header = unwind_canonical_header;
+        self
+    }
+
+    /// Returns the maximum number of concurrent prewarm tasks per block.
+    pub const fn max_prewarm_task_concurrency(&self) -> usize {
+        self.max_prewarm_task_concurrency
+    }
+
+    /// Setter for the maximum number of concurrent prewarm tasks per block.
+    pub const fn with_max_prewarm_task_concurrency(
+        mut self,
+        max_prewarm_task_concurrency: usize,
+    ) -> Self {
+        self.max_prewarm_task_concurrency = max_prewarm_task_concurrency;
         self
     }
 
