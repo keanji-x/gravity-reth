@@ -197,7 +197,12 @@ where
 
     fn on_event(&mut self, event: FromEngine<Self::Request, Self::Block>) {
         // delegate to the tree
-        let _ = self.to_tree.send(event);
+        if self.to_tree.send(event).is_err() {
+            // The engine tree thread has exited; close the receiver so that the next
+            // `poll()` call drains any remaining messages and then returns `FatalError`.
+            tracing::warn!(target: "engine", "engine tree channel closed, dropping CL request");
+            self.from_tree.close();
+        }
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<RequestHandlerEvent<Self::Event>> {
@@ -350,5 +355,187 @@ impl DownloadRequest {
     /// Returns a [`DownloadRequest`] for a single block.
     pub fn single_block(hash: B256) -> Self {
         Self::BlockSet(HashSet::from([hash]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+    use alloy_rpc_types_engine::ForkchoiceState;
+    use reth_engine_primitives::{BeaconEngineMessage, OnForkChoiceUpdated};
+    use reth_errors::RethResult;
+    use reth_ethereum_engine_primitives::EthEngineTypes;
+    use reth_ethereum_primitives::{Block as EthBlock, EthPrimitives};
+    use reth_payload_primitives::EngineApiMessageVersion;
+    use std::{
+        sync::mpsc,
+        task::{Context as TaskContext, Poll},
+    };
+    use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+
+    /// Helper: build a minimal `EngineApiRequestHandler` for `EthEngineTypes` /
+    /// `EthPrimitives`.  Returns the handler together with the raw mpsc *receiver*
+    /// so the test can drop it to simulate a dead tree thread, and the tokio
+    /// unbounded *sender* so the test can close `from_tree` independently.
+    fn make_handler() -> (
+        EngineApiRequestHandler<EngineApiRequest<EthEngineTypes, EthPrimitives>, EthPrimitives>,
+        mpsc::Receiver<FromEngine<EngineApiRequest<EthEngineTypes, EthPrimitives>, EthBlock>>,
+        tokio_mpsc::UnboundedSender<EngineApiEvent<EthPrimitives>>,
+    ) {
+        let (to_tree_tx, to_tree_rx) = mpsc::channel();
+        let (from_tree_tx, from_tree_rx) = tokio_mpsc::unbounded_channel();
+        let handler = EngineApiRequestHandler::new(to_tree_tx, from_tree_rx);
+        (handler, to_tree_rx, from_tree_tx)
+    }
+
+    /// Build a `ForkchoiceUpdated` beacon message together with its response
+    /// oneshot receiver.
+    fn make_fcu_message() -> (
+        BeaconEngineMessage<EthEngineTypes>,
+        oneshot::Receiver<RethResult<OnForkChoiceUpdated>>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let msg = BeaconEngineMessage::ForkchoiceUpdated {
+            state: ForkchoiceState {
+                head_block_hash: B256::ZERO,
+                safe_block_hash: B256::ZERO,
+                finalized_block_hash: B256::ZERO,
+            },
+            payload_attrs: None,
+            version: EngineApiMessageVersion::V1,
+            tx,
+        };
+        (msg, rx)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 – `on_event` silently discards `SendError` when the tree thread
+    // is dead (receiver dropped).  The call must not panic or return an error.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_on_event_silently_discards_send_error_when_receiver_dropped() {
+        let (mut handler, to_tree_rx, _from_tree_tx) = make_handler();
+
+        // Drop the receiver to simulate the tree thread having exited.
+        drop(to_tree_rx);
+
+        let (msg, _rx) = make_fcu_message();
+        let event =
+            FromEngine::Request(EngineApiRequest::Beacon(msg));
+
+        // This must not panic. The current (buggy) implementation silently
+        // swallows the error with `let _ = ...`.  The test documents that the
+        // error *is* discarded — it will still pass after the fix only if the
+        // fix doesn't panic, but the companion test below will then also
+        // exercise the new behaviour.
+        handler.on_event(event);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 – When `to_tree` receiver is dropped the oneshot sender embedded
+    // in the `BeaconEngineMessage` is also dropped, so the CL caller's
+    // `.await` receives `RecvError` (channel closed) instead of a structured
+    // engine response.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_dropped_oneshot_sender_when_tree_thread_dead() {
+        let (mut handler, to_tree_rx, _from_tree_tx) = make_handler();
+
+        // Kill the tree receiver.
+        drop(to_tree_rx);
+
+        let (msg, mut response_rx) = make_fcu_message();
+        handler.on_event(FromEngine::Request(EngineApiRequest::Beacon(msg)));
+
+        // The oneshot sender was inside the message which was dropped by the
+        // failed `mpsc::Sender::send`.  The receiver must therefore be closed.
+        match response_rx.try_recv() {
+            Err(oneshot::error::TryRecvError::Closed) => {
+                // Expected: the sender was dropped → CL caller gets no response
+            }
+            Ok(_) => panic!("unexpected response: tree receiver was dropped, no response expected"),
+            Err(oneshot::error::TryRecvError::Empty) => {
+                panic!("oneshot still open: the message was not dropped as expected")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 – When `to_tree` receiver is alive the message is forwarded and
+    // the oneshot sender is *not* dropped prematurely (control / regression).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_on_event_forwards_message_when_receiver_alive() {
+        let (mut handler, to_tree_rx, _from_tree_tx) = make_handler();
+
+        let (msg, mut response_rx) = make_fcu_message();
+        handler.on_event(FromEngine::Request(EngineApiRequest::Beacon(msg)));
+
+        // The mpsc receiver should have received the message.  Keep it bound so
+        // the oneshot::Sender inside is not dropped.
+        let _forwarded =
+            to_tree_rx.try_recv().expect("message should have been forwarded to tree");
+
+        // The oneshot is still open (no one answered yet, but it was not dropped).
+        assert!(
+            matches!(response_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "oneshot should still be open: sender was forwarded, not dropped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 – `poll()` returns `FatalError` once `from_tree` sender is
+    // dropped, but only *after* a poll tick — meaning there is a window where
+    // the engine looks alive while silently dropping messages.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_poll_returns_fatal_error_after_from_tree_closed() {
+        let (mut handler, _to_tree_rx, from_tree_tx) = make_handler();
+
+        // Close the from_tree channel (simulating tree thread exit).
+        drop(from_tree_tx);
+
+        // Poll once — must return FatalError.
+        let result = std::future::poll_fn(|cx| handler.poll(cx)).await;
+        assert!(
+            matches!(result, RequestHandlerEvent::HandlerEvent(HandlerEvent::FatalError)),
+            "poll() should return FatalError when from_tree is closed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 – After the fix: when on_event detects a dead to_tree channel it
+    // closes from_tree so that the next poll() returns FatalError even though
+    // the from_tree sender is still held by the test.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_on_event_closes_from_tree_on_send_error_so_poll_returns_fatal() {
+        let (mut handler, to_tree_rx, _from_tree_tx) = make_handler();
+
+        // Drop only the to_tree receiver (tree thread exited).
+        drop(to_tree_rx);
+        // Keep `_from_tree_tx` alive — without the fix poll() would return Pending.
+
+        let (msg, mut response_rx) = make_fcu_message();
+        handler.on_event(FromEngine::Request(EngineApiRequest::Beacon(msg)));
+
+        // The CL caller gets a closed channel — the message was dropped.
+        assert!(
+            matches!(response_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
+            "CL caller's oneshot should be closed (message was dropped on send error)"
+        );
+
+        // After the fix, on_event calls from_tree.close(), so poll() now
+        // returns FatalError on the very next tick — no more silent-drop window.
+        let waker = futures::task::noop_waker();
+        let mut cx = TaskContext::from_waker(&waker);
+        assert!(
+            matches!(
+                handler.poll(&mut cx),
+                Poll::Ready(RequestHandlerEvent::HandlerEvent(HandlerEvent::FatalError))
+            ),
+            "poll() must return FatalError after on_event closes from_tree"
+        );
     }
 }
