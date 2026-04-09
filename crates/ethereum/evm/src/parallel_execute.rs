@@ -107,31 +107,28 @@ where
         let txs = Arc::new(txs);
         let state = self.state.take().unwrap();
 
-        let (results, state) = {
-            let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(
-                cfg_env,
-                block_env,
-                txs,
-                state,
-                false,
-                self.custom_precompiles.clone(),
-            );
-            executor.parallel_execute(None).map_err(|e| {
-                BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
-                    hash: block
-                        .transactions_with_sender()
-                        .nth(e.txid)
-                        .unwrap()
-                        .1
-                        .recalculate_hash(),
-                    error: Box::new(e.error),
-                })
-            })?;
-            executor.take_result_and_state()
-        };
-
-        self.state = Some(state);
+        let EvmEnv { cfg_env, block_env } = evm_env;
+        let executor = Scheduler::new(
+            cfg_env,
+            block_env,
+            txs,
+            state,
+            false,
+            self.custom_precompiles.clone(),
+        );
+        let execute_result = executor.parallel_execute(None);
+        let (results, restored_state) = executor.take_result_and_state();
+        self.state = Some(restored_state);
+        execute_result.map_err(|e| {
+            BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
+                hash: block
+                    .transactions_with_sender()
+                    .nth(e.txid)
+                    .map(|(_, tx)| tx.recalculate_hash())
+                    .unwrap_or_default(),
+                error: Box::new(e.error),
+            })
+        })?;
 
         let mut receipts = Vec::with_capacity(results.len());
         let mut cumulative_gas_used = 0;
