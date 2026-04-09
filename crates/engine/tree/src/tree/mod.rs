@@ -585,8 +585,25 @@ where
             std::any::TypeId::of::<reth_ethereum_primitives::EthPrimitives>(),
             "pipe_run_inner requires N = EthPrimitives"
         );
-        let pipe_event_rx =
-            get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
+        // Recover from a poisoned mutex (a prior panic while holding the lock) rather
+        // than propagating a secondary panic, which would kill the engine thread
+        // with an unhelpful PoisonError.
+        let pipe_event_rx = {
+            let mut guard = get_pipe_exec_layer_event_bus()
+                .event_rx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match guard.take() {
+                Some(rx) => rx,
+                None => {
+                    // The receiver has already been taken (double-start of pipe_run_inner).
+                    // Return gracefully instead of panicking so the engine thread can shut
+                    // down cleanly.
+                    error!(target: "engine::tree", "pipe exec event receiver already taken — possible double-start of pipe_run_inner");
+                    return;
+                }
+            }
+        };
         // Safety: The TypeId assertion above guarantees N == EthPrimitives,
         // so Receiver<PipeExecLayerEvent<EthPrimitives>> and Receiver<PipeExecLayerEvent<N>>
         // are the same type at runtime.
