@@ -5,7 +5,7 @@ use alloy_primitives::{Bloom, Bytes, B256};
 use reth_chainspec::EthereumHardforks;
 use reth_consensus::ConsensusError;
 use reth_primitives_traits::{
-    receipt::gas_spent_by_transactions, Block, GotExpected, Receipt, RecoveredBlock,
+    receipt::gas_spent_by_transactions, Block, BlockBody, GotExpected, Receipt, RecoveredBlock,
 };
 
 /// Validate a block with regard to execution results:
@@ -23,6 +23,12 @@ where
     R: Receipt,
     ChainSpec: EthereumHardforks,
 {
+    // Ensure every transaction produced exactly one receipt.
+    let tx_count = block.body().transactions().len();
+    if tx_count != receipts.len() {
+        return Err(ConsensusError::ReceiptCountMismatch { expected: tx_count, got: receipts.len() })
+    }
+
     // Check if gas used matches the value set in header.
     let cumulative_gas_used =
         receipts.last().map(|receipt| receipt.cumulative_gas_used()).unwrap_or(0);

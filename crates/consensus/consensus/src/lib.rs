@@ -403,6 +403,14 @@ pub enum ConsensusError {
         /// The maximum allowed RLP length.
         max_rlp_length: usize,
     },
+    /// Error when the number of receipts does not match the number of transactions.
+    #[error("receipt count mismatch: got {got}, expected {expected}")]
+    ReceiptCountMismatch {
+        /// The actual number of receipts.
+        got: usize,
+        /// The expected number of receipts (equal to the number of transactions).
+        expected: usize,
+    },
     /// EIP-7825: Transaction gas limit exceeds maximum allowed
     #[error(transparent)]
     TransactionGasLimitTooHigh(Box<TxGasLimitTooHighErr>),
