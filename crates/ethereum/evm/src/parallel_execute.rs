@@ -414,3 +414,111 @@ fn balance_increment_state<DB: ParallelDatabase>(
         .map(|(addr, _)| load_account(addr))
         .collect::<Result<EvmState, _>>()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+    use revm::database::{CacheDB, EmptyDB};
+
+    fn empty_parallel_state() -> ParallelState<CacheDB<EmptyDB>> {
+        ParallelState::new(CacheDB::new(EmptyDB::default()), false, false)
+    }
+
+    /// Regression test for issue #239:
+    /// `balance_increment_state` must NOT return an error when a fresh address (never seen
+    /// on-chain) has a cache entry with `account: None`.
+    ///
+    /// The standard grevm representation for an address that has been loaded from a DB that
+    /// returns `None` is `CacheAccountInfo { account: None, status: LoadedNotExisting }`.
+    /// The current implementation calls `.ok_or_else(|| err)` on that `Option<AccountInfo>`,
+    /// turning the "non-existent account" sentinel into a hard `BlockExecutionError`. Any
+    /// block with an EIP-4895 withdrawal (or any balance increment) to an address that has
+    /// never transacted on this chain will therefore fail post-execution.
+    ///
+    /// Expected fix: treat `None` as a zero-balance `AccountInfo` (via `unwrap_or_default()`),
+    /// which is the same semantics used in `hardfork/common.rs` for the same pattern.
+    ///
+    /// This test FAILS with the current (buggy) code and PASSES after the fix.
+    #[test]
+    fn test_balance_increment_state_fresh_account_none_entry_should_succeed() {
+        let state = empty_parallel_state();
+        let fresh_addr = address!("cafecafecafecafecafecafecafecafecafecafe");
+
+        // Insert the address as LoadedNotExisting — the canonical cache representation for
+        // "this address has been observed but does not exist on-chain (account = None)".
+        state.insert_not_existing(fresh_addr);
+
+        // Precondition: the cache entry exists and its `account` field is None.
+        assert!(
+            state.cache.accounts.get(&fresh_addr).unwrap().account.is_none(),
+            "precondition: fresh address must have account=None in cache"
+        );
+
+        // Build a non-zero balance increment for the fresh address (e.g. an EIP-4895
+        // withdrawal of 32 Gwei worth of ETH).
+        let mut balance_increments = HashMap::default();
+        balance_increments.insert(fresh_addr, 32_000_000_000_u128);
+
+        // balance_increment_state should treat a None cache entry as a zero-balance account,
+        // not as an error.  With the current code this returns:
+        //   Err(BlockExecutionError("could not load account for balance increment"))
+        let result = balance_increment_state(&balance_increments, &state);
+        assert!(
+            result.is_ok(),
+            "balance_increment_state must treat a None cache entry as zero-balance, \
+             but returned: {:?}",
+            result.err()
+        );
+    }
+
+    /// Baseline: `balance_increment_state` succeeds when the cache already holds a
+    /// fully-populated `Some(AccountInfo)` entry (i.e. the "normal" path for existing
+    /// accounts). This test should pass both before and after the fix.
+    #[test]
+    fn test_balance_increment_state_existing_account_succeeds() {
+        use alloy_primitives::U256;
+        use revm::state::AccountInfo;
+
+        let state = empty_parallel_state();
+        let addr = address!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+
+        // Insert a real account with a non-zero balance into the cache.
+        state.cache.insert_account(
+            addr,
+            AccountInfo { balance: U256::from(1_000_000_u64), nonce: 1, ..Default::default() },
+        );
+
+        let mut balance_increments = HashMap::default();
+        balance_increments.insert(addr, 500_000_u128);
+
+        let result = balance_increment_state(&balance_increments, &state);
+        assert!(result.is_ok(), "balance_increment_state should succeed for an existing account");
+
+        let evm_state = result.unwrap();
+        assert!(evm_state.contains_key(&addr), "result state must contain the incremented address");
+        assert_eq!(
+            evm_state[&addr].status,
+            AccountStatus::Touched,
+            "result account must have Touched status"
+        );
+    }
+
+    /// Edge-case: zero-balance increments must be filtered out and never cause an error,
+    /// even if the address is absent from the cache entirely.
+    #[test]
+    fn test_balance_increment_state_zero_amount_is_filtered() {
+        let state = empty_parallel_state();
+        let addr = address!("1111111111111111111111111111111111111111");
+
+        // Do NOT insert addr into the cache at all.
+        let mut balance_increments = HashMap::default();
+        balance_increments.insert(addr, 0_u128);
+
+        // The filter in balance_increment_state skips zero-value entries, so this must
+        // return an empty Ok(EvmState) rather than an error.
+        let result = balance_increment_state(&balance_increments, &state);
+        assert!(result.is_ok(), "zero-balance increment must be silently skipped");
+        assert!(result.unwrap().is_empty(), "no accounts should be in the result for zero balance");
+    }
+}
