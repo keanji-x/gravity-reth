@@ -67,6 +67,7 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
     use reth_evm::execute::BlockValidationError;
 
     let mut hardfork_changes: EvmState = EvmState::default();
+    let mut pending_contracts: Vec<(B256, Bytecode)> = Vec::new();
 
     // 1. Apply all bytecode upgrades (system + extra)
     let all_upgrades = hardfork.system_upgrades().iter().chain(hardfork.extra_upgrades().iter());
@@ -94,7 +95,8 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             );
         }
 
-        state.cache.contracts.insert(code_hash, new_bytecode);
+        // Defer contract cache insertion until all fallible operations succeed
+        pending_contracts.push((code_hash, new_bytecode));
     }
 
     // 2. Apply storage patches
@@ -160,6 +162,10 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
     }
 
     // 4. Commit all changes atomically
+    // Insert deferred contract bytecodes only after all fallible operations have succeeded
+    for (code_hash, new_bytecode) in pending_contracts {
+        state.cache.contracts.insert(code_hash, new_bytecode);
+    }
     state.commit(hardfork_changes);
     Ok(())
 }
