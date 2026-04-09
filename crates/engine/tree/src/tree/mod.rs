@@ -1494,7 +1494,10 @@ where
                                 let mut output =
                                     self.on_forkchoice_updated(state, payload_attrs, version);
 
-                                if let Ok(res) = &mut output {
+                                let maybe_event =
+                                    output.as_mut().ok().and_then(|res| res.event.take());
+
+                                if let Ok(res) = &output {
                                     // track last received forkchoice state
                                     self.state
                                         .forkchoice_state_tracker
@@ -1505,11 +1508,10 @@ where
                                         state,
                                         res.outcome.forkchoice_status(),
                                     ));
-
-                                    // handle the event if any
-                                    self.on_maybe_tree_event(res.event.take())?;
                                 }
 
+                                // send response before handling the event, so the CL always
+                                // receives a response even if event processing fails fatally
                                 if let Err(err) =
                                     tx.send(output.map(|o| o.outcome).map_err(Into::into))
                                 {
@@ -1519,6 +1521,9 @@ where
                                         .increment(1);
                                     error!(target: "engine::tree", "Failed to send event: {err:?}");
                                 }
+
+                                // handle the event if any
+                                self.on_maybe_tree_event(maybe_event)?;
                             }
                             BeaconEngineMessage::NewPayload { payload, tx } => {
                                 let mut output = self.on_new_payload(payload);
