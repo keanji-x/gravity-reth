@@ -246,9 +246,16 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     ///
     /// Note: This assumes that the parent block of the pending block is canonical.
     pub fn set_pending_block(&self, pending: ExecutedBlockWithTrieUpdates<N>) {
-        // fetch the state of the pending block's parent block
-        let parent = self.state_by_hash(pending.recovered_block().parent_hash());
-        let pending = BlockState::with_parent(pending, parent);
+        // Fetch the parent block state while holding the read lock so that a concurrent reorg
+        // cannot remove the parent from the canonical `blocks` map between the lookup and the
+        // time we store the pending block.  Constructing `BlockState` under the lock eliminates
+        // the TOCTOU window: by the time we release the lock the parent reference is already
+        // baked into the `BlockState` we are about to send.
+        let pending = {
+            let blocks = self.inner.in_memory_state.blocks.read();
+            let parent = blocks.get(&pending.recovered_block().parent_hash()).cloned();
+            BlockState::with_parent(pending, parent)
+        };
         self.inner.in_memory_state.pending.send_modify(|p| {
             p.replace(pending);
         });
@@ -1568,5 +1575,157 @@ mod tests {
                 ))
             }
         );
+    }
+
+    /// Verifies the invariant that after [`CanonicalInMemoryState::set_pending_block`] completes,
+    /// the pending block's `parent` field (if `Some`) must still be resolvable via
+    /// [`CanonicalInMemoryState::state_by_hash`].
+    ///
+    /// This is the invariant that the TOCTOU race in `set_pending_block` can violate under
+    /// concurrent execution: `set_pending_block` captures the parent `Arc` while holding no lock,
+    /// so a concurrent reorg can remove the parent from `blocks` and clear `pending` before
+    /// `set_pending_block` writes the stale `Arc` back into `pending`.
+    ///
+    /// This sequential version confirms correct behavior under normal (non-raced) conditions and
+    /// serves as a regression guard: a correct fix must continue to satisfy this invariant.
+    #[test]
+    fn test_set_pending_block_parent_invariant_sequential() {
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        let mut builder = TestBlockBuilder::<EthPrimitives>::default();
+
+        let block0 = builder.get_executed_block_with_number(0, B256::random());
+        let block1 =
+            builder.get_executed_block_with_number(1, block0.recovered_block().hash());
+        let block2 =
+            builder.get_executed_block_with_number(2, block1.recovered_block().hash());
+
+        // Commit block0 and block1 to the canonical in-memory chain.
+        state.update_chain(NewCanonicalChain::Commit { new: vec![block0, block1.clone()] });
+
+        // Call the real set_pending_block — this is the function under test.
+        state.set_pending_block(block2.clone());
+
+        // Invariant: if pending has a parent, that parent must be resolvable via state_by_hash.
+        let pending =
+            state.pending_state().expect("pending block should be set after set_pending_block");
+        let parent = pending
+            .parent
+            .as_ref()
+            .expect("block2's parent (block1) is canonical, so pending.parent must be Some");
+        assert_eq!(
+            parent.hash(),
+            block1.recovered_block().hash(),
+            "pending.parent must point to block1"
+        );
+        assert!(
+            state.state_by_hash(parent.hash()).is_some(),
+            "INVARIANT: pending.parent (hash={}) must be resolvable via state_by_hash. \
+             Under concurrent execution, set_pending_block can store an orphaned parent Arc \
+             when a reorg fires between its state_by_hash call and its send_modify call.",
+            parent.hash()
+        );
+    }
+
+    /// Concurrent stress test for the TOCTOU race in [`CanonicalInMemoryState::set_pending_block`].
+    ///
+    /// The vulnerable sequence inside `set_pending_block` (lines 250–254):
+    /// ```text
+    ///   let parent = self.state_by_hash(...);   // (A) read-lock acquired + released
+    ///   let pending = BlockState::with_parent(pending, parent);
+    ///   self.inner.in_memory_state.pending.send_modify(|p| { p.replace(pending); }); // (C) watch-lock only
+    /// ```
+    ///
+    /// Between (A) and (C) the `blocks` write-lock is not held, so a concurrent
+    /// `update_blocks` can:
+    ///   1. Acquire the write lock on `blocks`
+    ///   2. Remove block1 (block2's parent) from `blocks`
+    ///   3. Call `pending.send_modify(|p| { p.take(); })` to clear pending
+    ///   4. Release all locks
+    ///
+    /// When (C) then executes, it stores a `BlockState` whose `parent` Arc points to block1,
+    /// which is no longer in `blocks`. This violates the invariant:
+    /// > pending.parent is Some(p) → state_by_hash(p.hash()) is Some
+    ///
+    /// Both threads are released simultaneously via a `Barrier`. Thread A adds a
+    /// `yield_now()` after the barrier to widen the scheduling window between (A) and (C),
+    /// improving the probability that Thread B completes its reorg in that gap.
+    ///
+    /// **Note**: requires a multi-core CPU for the race to manifest. On single-core systems
+    /// threads are not truly parallel at the instruction level; the test will pass without
+    /// detecting the violation, but that does not indicate the absence of the bug.
+    #[test]
+    fn test_set_pending_block_concurrent_reorg_parent_invariant() {
+        use std::sync::Barrier as StdBarrier;
+
+        // Build blocks once and clone per iteration to reduce setup overhead,
+        // allowing a higher iteration count within a reasonable wall-clock budget.
+        let mut builder = TestBlockBuilder::<EthPrimitives>::default();
+        let block0 = builder.get_executed_block_with_number(0, B256::random());
+        let block1 =
+            builder.get_executed_block_with_number(1, block0.recovered_block().hash());
+        let block1a =
+            builder.get_executed_block_with_number(1, block0.recovered_block().hash());
+        let block2 =
+            builder.get_executed_block_with_number(2, block1.recovered_block().hash());
+
+        // 5 000 iterations give the scheduler many opportunities to interleave threads at
+        // the precise gap between state_by_hash and send_modify inside set_pending_block.
+        const ITERATIONS: u32 = 5_000;
+
+        for iteration in 0..ITERATIONS {
+            let state = Arc::new(CanonicalInMemoryState::empty());
+            // Pre-condition: block0 and block1 are canonical.
+            state.update_chain(NewCanonicalChain::Commit {
+                new: vec![block0.clone(), block1.clone()],
+            });
+
+            let barrier = Arc::new(StdBarrier::new(2));
+
+            // Thread A: calls the real set_pending_block.
+            //   Internally: (A) state_by_hash (read-lock released) → (B) with_parent → (C) send_modify
+            let state_a = state.clone();
+            let barrier_a = barrier.clone();
+            let block2_a = block2.clone();
+            let handle_a = std::thread::spawn(move || {
+                barrier_a.wait();
+                // yield_now widens the window between (A) and (C) inside set_pending_block,
+                // increasing the probability that Thread B completes the reorg in that gap.
+                std::thread::yield_now();
+                state_a.set_pending_block(block2_a);
+            });
+
+            // Thread B: concurrent reorg — removes block1 from blocks and clears pending,
+            //   all while holding the write lock on both blocks and numbers.
+            let state_b = state.clone();
+            let barrier_b = barrier.clone();
+            let block1_b = block1.block.clone();
+            let block1a_b = block1a.clone();
+            let handle_b = std::thread::spawn(move || {
+                barrier_b.wait();
+                state_b.update_chain(NewCanonicalChain::Reorg {
+                    new: vec![block1a_b],
+                    old: vec![block1_b],
+                });
+            });
+
+            handle_a.join().unwrap();
+            handle_b.join().unwrap();
+
+            // Invariant check: if pending_state has a parent, that parent must be resolvable.
+            // A violation means set_pending_block wrote a stale parent Arc after the reorg
+            // had already removed the block from `blocks` and cleared `pending`.
+            if let Some(pending) = state.pending_state() {
+                if let Some(parent) = &pending.parent {
+                    assert!(
+                        state.state_by_hash(parent.hash()).is_some(),
+                        "iteration {iteration}: TOCTOU race in set_pending_block detected — \
+                         pending.parent (hash={}) is not reachable via state_by_hash. \
+                         set_pending_block stored the parent Arc captured before the reorg \
+                         after the reorg removed block1 from canonical blocks and cleared pending.",
+                        parent.hash()
+                    );
+                }
+            }
+        }
     }
 }
