@@ -1177,7 +1177,7 @@ fn test_make_executed_block_canonical_sets_safe_and_finalized() {
     );
 
     // Call make_executed_block_canonical
-    test_harness.tree.make_executed_block_canonical(block.clone());
+    test_harness.tree.make_executed_block_canonical(block.clone()).unwrap();
 
     // Verify safe block is set correctly
     let safe_num_hash = test_harness.tree.canonical_in_memory_state.get_safe_num_hash();
@@ -1242,7 +1242,7 @@ fn test_gravity_chain_make_canonical_e2e_flow() {
         let block_number = block.recovered_block.number();
 
         // Process the block through make_executed_block_canonical
-        test_harness.tree.make_executed_block_canonical(block.clone());
+        test_harness.tree.make_executed_block_canonical(block.clone()).unwrap();
 
         // Verify canonical head is updated
         let canonical_head = test_harness.tree.canonical_in_memory_state.get_canonical_head();

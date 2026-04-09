@@ -491,7 +491,10 @@ where
     /// the gravity-sdk integration the panic handler is configured to abort the
     /// process (via `std::process::exit`), so a dropped receiver terminates the
     /// node rather than silently leaving a broken engine tree running.
-    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
+    fn on_pipe_exec_event(
+        &mut self,
+        event: PipeExecLayerEvent<N>,
+    ) -> ProviderResult<()> {
         match event {
             PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
                 let block_number = executed_block.recovered_block.number();
@@ -499,7 +502,7 @@ where
                     block_number=%block_number,
                     block_hash=%executed_block.recovered_block.hash(),
                     "Received make canonical event");
-                self.make_executed_block_canonical(executed_block);
+                self.make_executed_block_canonical(executed_block)?;
                 tx.send(()).expect("Failed to send make canonical event");
             }
             PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
@@ -518,6 +521,7 @@ where
                 }
             }
         }
+        Ok(())
     }
 
     /// DESIGN: `insert_executed` → `make_canonical` runs synchronously within
@@ -528,8 +532,10 @@ where
     /// `on_new_head` only checks `current_canonical_head.hash` (a plain
     /// `BlockNumHash` value) — it does not require the parent to still exist in
     /// `blocks_by_hash` for the normal sequential extension case.
-    fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
-        let block_number = block.recovered_block.number();
+    fn make_executed_block_canonical(
+        &mut self,
+        block: ExecutedBlockWithTrieUpdates<N>,
+    ) -> ProviderResult<()> {
         let block_hash = block.recovered_block.hash();
         let sealed_header = block.recovered_block.clone_sealed_header();
 
@@ -544,15 +550,13 @@ where
             ForkchoiceStatus::Valid,
         );
 
-        self.make_canonical(block_hash).unwrap_or_else(|err| {
-            panic!(
-                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
-            )
-        });
+        self.make_canonical(block_hash)?;
 
         // deterministic consensus means canonical block is immediately safe and finalized
         self.canonical_in_memory_state.set_safe(sealed_header.clone());
         self.canonical_in_memory_state.set_finalized(sealed_header);
+
+        Ok(())
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
@@ -596,7 +600,12 @@ where
             unsafe { std::mem::transmute(pipe_event_rx) };
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
-                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(Some(event)) => {
+                    if let Err(err) = self.on_pipe_exec_event(event) {
+                        error!(target: "engine::tree", %err, "Failed to make block canonical");
+                        return
+                    }
+                }
                 Ok(None) => {}
                 Err(RecvError) => {
                     error!(target: "engine::tree", "Pipe exec layer channel disconnected");

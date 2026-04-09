@@ -38,7 +38,7 @@ use reth_evm_ethereum::MockEvmConfig;
 use reth_payload_primitives::NewPayloadError;
 use reth_primitives_traits::{Block as _, RecoveredBlock};
 use reth_provider::test_utils::MockEthProvider;
-use std::{panic, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc::unbounded_channel;
 
 // ---------------------------------------------------------------------------
@@ -207,32 +207,14 @@ fn test_issue_225_make_executed_block_canonical_panics_on_provider_error() {
     //      through to MockEthProvider::sealed_block_with_senders → Ok(None)
     //      → .ok_or_else(|| ProviderError::HeaderNotFound(…))? → Err.
     //   4. make_canonical returns Err.
-    //   5. BUG: unwrap_or_else(|err| panic!(…)) fires.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        tree.make_executed_block_canonical(fork_block);
-    }));
+    //   5. FIX: the error is propagated via `?` instead of causing a panic.
+    let result = tree.make_executed_block_canonical(fork_block);
 
-    // The assertion CONFIRMS the bug is present: the call panicked.
-    // Once the bug is fixed, result will be Ok(()) and this assertion must
-    // be inverted (or the test rewritten to check graceful error handling).
+    // The fix propagates the ProviderError gracefully instead of panicking.
     assert!(
         result.is_err(),
-        "Bug confirmed (issue #225): make_executed_block_canonical panicked on ProviderError. \
-         The fix should remove the panic! and propagate the error gracefully."
+        "make_executed_block_canonical should return Err on ProviderError, not panic"
     );
-
-    // Optionally verify the panic message contains the expected text.
-    if let Err(payload) = result {
-        let msg = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap_or("<non-string panic payload>");
-        assert!(
-            msg.contains("Failed to make canonical"),
-            "Panic message should contain 'Failed to make canonical', got: {msg}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
