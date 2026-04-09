@@ -109,6 +109,12 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             .storage_ref(*addr, slot_key)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        // Idempotency guard: skip if the slot already holds the target value.
+        // This makes re-application on retry a no-op and prevents original_value corruption.
+        if original_value == *value {
+            continue;
+        }
+
         let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
             // Account already loaded above; create a minimal touched entry
             let info = state
@@ -139,6 +145,12 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             let original_value = state
                 .storage_ref(*addr, slot_key)
                 .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+            // Idempotency guard: skip if the slot already holds the target value.
+            // This makes re-application on retry a no-op and prevents original_value corruption.
+            if original_value == *value {
+                continue;
+            }
 
             let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
                 let info = state

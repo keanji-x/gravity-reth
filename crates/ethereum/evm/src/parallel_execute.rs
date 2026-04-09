@@ -213,6 +213,20 @@ where
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        // call state hook with changes due to balance increments.
+        // This must run before Gamma/Delta hardfork upgrades: after increment_balances all
+        // accounts in balance_increments are guaranteed to be loaded in the cache with
+        // account = Some(...), so balance_increment_state cannot return a None-account error.
+        // Running it here prevents a partial-state retry from double-counting balances.
+        self.system_caller.try_on_state_with(|| {
+            balance_increment_state(&balance_increments, state).map(|state| {
+                (
+                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
+                    Cow::Owned(state),
+                )
+            })
+        })?;
+
         {
             use crate::hardfork::{
                 common::apply_hardfork_upgrades, delta::DeltaHardfork, gamma::GammaHardfork,
@@ -226,16 +240,6 @@ where
                 apply_hardfork_upgrades(&DeltaHardfork, state)?;
             }
         }
-
-        // call state hook with changes due to balance increments.
-        self.system_caller.try_on_state_with(|| {
-            balance_increment_state(&balance_increments, state).map(|state| {
-                (
-                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
-                    Cow::Owned(state),
-                )
-            })
-        })?;
 
         Ok(requests)
     }
