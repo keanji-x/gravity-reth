@@ -160,6 +160,12 @@ impl ProofSequencer {
     fn add_proof(&mut self, sequence: u64, update: SparseTrieUpdate) -> Vec<SparseTrieUpdate> {
         if sequence >= self.next_to_deliver {
             self.pending_proofs.insert(sequence, update);
+        } else {
+            tracing::error!(
+                sequence,
+                next_to_deliver = self.next_to_deliver,
+                "proof sequencer received out-of-window sequence, proof discarded"
+            );
         }
 
         // return early if we don't have the next expected proof
@@ -738,16 +744,18 @@ where
         let all_proofs_processed =
             proofs_processed >= state_update_proofs_requested + prefetch_proofs_requested;
         let no_pending = !self.proof_sequencer.has_pending();
+        let sequencer_drained = self.proof_sequencer.next_to_deliver == self.proof_sequencer.next_sequence;
         debug!(
             target: "engine::root",
             proofs_processed,
             state_update_proofs_requested,
             prefetch_proofs_requested,
             no_pending,
+            sequencer_drained,
             updates_finished,
             "Checking end condition"
         );
-        all_proofs_processed && no_pending && updates_finished
+        all_proofs_processed && no_pending && sequencer_drained && updates_finished
     }
 
     /// Calls `get_proof_targets` with existing proof targets for prefetching.
