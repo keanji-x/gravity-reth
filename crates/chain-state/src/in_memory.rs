@@ -314,21 +314,21 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// This will update the links between blocks and remove all blocks that are [..
     /// `persisted_height`].
     pub fn remove_persisted_blocks(&self, persisted_num_hash: BlockNumHash) {
-        // if the persisted hash is not in the canonical in memory state, do nothing, because it
-        // means canonical blocks were not actually persisted.
-        //
-        // This can happen if the persistence task takes a long time, while a reorg is happening.
-        {
-            if self.inner.in_memory_state.blocks.read().get(&persisted_num_hash.hash).is_none() {
-                // do nothing
-                return
-            }
-        }
-
         {
             // acquire locks, starting with the numbers lock
             let mut numbers = self.inner.in_memory_state.numbers.write();
             let mut blocks = self.inner.in_memory_state.blocks.write();
+
+            // if the persisted hash is not in the canonical in memory state, do nothing, because it
+            // means canonical blocks were not actually persisted.
+            //
+            // This can happen if the persistence task takes a long time, while a reorg is
+            // happening. The check is performed under the write lock to avoid a TOCTOU race
+            // where a concurrent reorg replaces the canonical maps between the check and the
+            // mutation.
+            if !blocks.contains_key(&persisted_num_hash.hash) {
+                return
+            }
 
             let BlockNumHash { number: persisted_height, hash: _ } = persisted_num_hash;
 
