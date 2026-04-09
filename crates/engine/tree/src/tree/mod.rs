@@ -1526,6 +1526,12 @@ where
                                 let maybe_event =
                                     output.as_mut().ok().and_then(|out| out.event.take());
 
+                                // handle the event (e.g. MakeCanonical) BEFORE sending the
+                                // response to the CL. If this fails, we must not report VALID
+                                // to the CL because the canonical chain update never completed,
+                                // which would cause EL/CL state divergence (issue #223).
+                                self.on_maybe_tree_event(maybe_event)?;
+
                                 // emit response
                                 if let Err(err) =
                                     tx.send(output.map(|o| o.outcome).map_err(|e| {
@@ -1538,9 +1544,6 @@ where
                                         .failed_new_payload_response_deliveries
                                         .increment(1);
                                 }
-
-                                // handle the event if any
-                                self.on_maybe_tree_event(maybe_event)?;
                             }
                         }
                     }
