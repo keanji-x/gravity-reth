@@ -197,7 +197,12 @@ where
 
     fn on_event(&mut self, event: FromEngine<Self::Request, Self::Block>) {
         // delegate to the tree
-        let _ = self.to_tree.send(event);
+        if self.to_tree.send(event).is_err() {
+            // The engine tree thread has exited; close the receiver so that the next
+            // `poll()` call drains any remaining messages and then returns `FatalError`.
+            tracing::warn!(target: "engine", "engine tree channel closed, dropping CL request");
+            self.from_tree.close();
+        }
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<RequestHandlerEvent<Self::Event>> {
@@ -500,35 +505,37 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5 – Demonstrates the race: on_event drops a message (dead to_tree)
-    // but poll() has not yet fired FatalError because from_tree is still open.
-    // This is the exact "node appears alive but is functionally dead" window.
+    // Test 5 – After the fix: when on_event detects a dead to_tree channel it
+    // closes from_tree so that the next poll() returns FatalError even though
+    // the from_tree sender is still held by the test.
     // -----------------------------------------------------------------------
     #[test]
-    fn test_silent_drop_window_before_fatal_error_propagates() {
+    fn test_on_event_closes_from_tree_on_send_error_so_poll_returns_fatal() {
         let (mut handler, to_tree_rx, _from_tree_tx) = make_handler();
 
         // Drop only the to_tree receiver (tree thread exited).
         drop(to_tree_rx);
-        // Keep `_from_tree_tx` alive so poll() does NOT yet return FatalError.
+        // Keep `_from_tree_tx` alive — without the fix poll() would return Pending.
 
         let (msg, mut response_rx) = make_fcu_message();
         handler.on_event(FromEngine::Request(EngineApiRequest::Beacon(msg)));
 
-        // The CL caller gets a closed channel — no structured error.
+        // The CL caller gets a closed channel — the message was dropped.
         assert!(
             matches!(response_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
-            "CL caller's oneshot should be closed (message was silently dropped)"
+            "CL caller's oneshot should be closed (message was dropped on send error)"
         );
 
-        // poll() is Pending because from_tree_tx is still alive — the outer
-        // event loop has no idea the engine is dead yet.
+        // After the fix, on_event calls from_tree.close(), so poll() now
+        // returns FatalError on the very next tick — no more silent-drop window.
         let waker = futures::task::noop_waker();
         let mut cx = TaskContext::from_waker(&waker);
         assert!(
-            matches!(handler.poll(&mut cx), Poll::Pending),
-            "poll() must return Pending (not FatalError) while from_tree sender is alive, \
-             confirming the silent-drop window exists"
+            matches!(
+                handler.poll(&mut cx),
+                Poll::Ready(RequestHandlerEvent::HandlerEvent(HandlerEvent::FatalError))
+            ),
+            "poll() must return FatalError after on_event closes from_tree"
         );
     }
 }
