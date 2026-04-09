@@ -387,17 +387,15 @@ fn balance_increment_state<DB: ParallelDatabase>(
     balance_increments: &HashMap<Address, u128>,
     state: &ParallelState<DB>,
 ) -> Result<EvmState, BlockExecutionError> {
-    let load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
+    let load_account = |address: &Address| -> (Address, Account) {
         let info = state
             .cache
             .accounts
             .get(address)
             .and_then(|account| account.value().account.clone())
-            .ok_or_else(|| {
-                BlockExecutionError::msg("could not load account for balance increment")
-            })?;
+            .unwrap_or_default();
 
-        Ok((
+        (
             *address,
             Account {
                 info,
@@ -405,14 +403,14 @@ fn balance_increment_state<DB: ParallelDatabase>(
                 status: AccountStatus::Touched,
                 transaction_id: 0,
             },
-        ))
+        )
     };
 
-    balance_increments
+    Ok(balance_increments
         .iter()
         .filter(|&(_, &balance)| balance != 0)
         .map(|(addr, _)| load_account(addr))
-        .collect::<Result<EvmState, _>>()
+        .collect::<EvmState>())
 }
 
 #[cfg(test)]
