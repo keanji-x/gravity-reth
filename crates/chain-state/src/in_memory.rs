@@ -246,9 +246,16 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     ///
     /// Note: This assumes that the parent block of the pending block is canonical.
     pub fn set_pending_block(&self, pending: ExecutedBlockWithTrieUpdates<N>) {
-        // fetch the state of the pending block's parent block
-        let parent = self.state_by_hash(pending.recovered_block().parent_hash());
-        let pending = BlockState::with_parent(pending, parent);
+        // Fetch the parent block state while holding the read lock so that a concurrent reorg
+        // cannot remove the parent from the canonical `blocks` map between the lookup and the
+        // time we store the pending block.  Constructing `BlockState` under the lock eliminates
+        // the TOCTOU window: by the time we release the lock the parent reference is already
+        // baked into the `BlockState` we are about to send.
+        let pending = {
+            let blocks = self.inner.in_memory_state.blocks.read();
+            let parent = blocks.get(&pending.recovered_block().parent_hash()).cloned();
+            BlockState::with_parent(pending, parent)
+        };
         self.inner.in_memory_state.pending.send_modify(|p| {
             p.replace(pending);
         });
