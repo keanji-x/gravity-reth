@@ -77,12 +77,18 @@ pub trait ParallelExecutor {
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.
 #[derive(Debug)]
-pub struct WrapExecutor<DB: Database, T: Executor<DB>>(pub T, PhantomData<DB>);
+pub struct WrapExecutor<DB: Database, T: Executor<DB>> {
+    /// The inner executor.
+    pub executor: T,
+    /// Custom precompiles accumulated via [`ParallelExecutor::apply_custom_precompiles`].
+    custom_precompiles: Vec<(Address, DynPrecompile)>,
+    _db: PhantomData<DB>,
+}
 
 impl<DB: Database, T: Executor<DB>> WrapExecutor<DB, T> {
     /// Creates a new `WrapExecutor` from the given executor.
     pub const fn new(executor: T) -> Self {
-        Self(executor, PhantomData)
+        Self { executor, custom_precompiles: Vec::new(), _db: PhantomData }
     }
 }
 
@@ -96,17 +102,17 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        self.0.execute_one(block)
+        self.executor.execute_one(block)
     }
 
     #[inline]
     fn take_bundle(&mut self) -> BundleState {
-        self.0.take_bundle()
+        self.executor.take_bundle()
     }
 
     #[inline]
     fn size_hint(&self) -> usize {
-        self.0.size_hint()
+        self.executor.size_hint()
     }
 
     #[inline]
@@ -116,15 +122,17 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
-        self.0.transact_system_txn(evm_env, precompiles, tx_env)
+        let mut merged = self.custom_precompiles.clone();
+        merged.extend(precompiles);
+        self.executor.transact_system_txn(evm_env, merged, tx_env)
     }
 
     #[inline]
     fn apply_custom_precompiles(
         &mut self,
-        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+        custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     ) {
-        // TODO(Ashin Gau): How does basic executor handle custom precompiles
+        self.custom_precompiles.extend(custom_precompiles.iter().cloned());
     }
 }
 
